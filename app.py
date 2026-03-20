@@ -727,7 +727,7 @@ with tab1:
         """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════
-# TAB 2 — Bridge tool
+# TAB 2 — Bridge tool (full JS logic, bidirectional via hidden textarea)
 # ══════════════════════════════════════════════
 with tab2:
     if st.session_state.result_polys is None:
@@ -736,7 +736,7 @@ with tab2:
         polys_info = st.session_state.result_polys
         stats = st.session_state.result_stats
 
-        # Build interactive_lines if not yet built or stale
+        # Build interactive_lines on first load
         if not st.session_state.interactive_lines:
             lines = []
             for p, ang, is_bf, center in polys_info:
@@ -775,56 +775,106 @@ with tab2:
 
         cW = stats['compressed_w']
         cH = stats['compressed_h']
-        all_lines_json = json.dumps([{"c": l["coords"], "t": l["type"]}
-                                     for l in st.session_state.interactive_lines])
+
+        # ── Python-side buttons (撤銷 / 復原) ──
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1, 1, 4])
+        with col_ctrl1:
+            if st.button("↩️ 撤銷上一橋接"):
+                if st.session_state.manual_connectors:
+                    st.session_state.manual_connectors.pop()
+                if 'bridge_lines_history' in st.session_state and st.session_state.bridge_lines_history:
+                    st.session_state.interactive_lines = st.session_state.bridge_lines_history.pop()
+                st.rerun()
+        with col_ctrl2:
+            if st.button("🔄 全部復原"):
+                st.session_state.manual_connectors = []
+                st.session_state.interactive_lines = []
+                st.session_state.bridge_lines_history = []
+                st.rerun()
+        with col_ctrl3:
+            st.markdown(
+                f"<div style='padding:6px 0; font-size:12px; color:#565f89'>"
+                f"橋接數：{len(st.session_state.manual_connectors)} 個 ｜ "
+                f"線段：{len(st.session_state.interactive_lines)} 條 ｜ "
+                f"板子：{cW:.1f} × {cH:.1f} mm</div>",
+                unsafe_allow_html=True
+            )
+
+        # ── Hidden textarea receives bridge result from JS ──
+        # Format: JSON {"lines": [...], "connector": {...}}
+        bridge_result = st.text_area(
+            "bridge_data_transfer",
+            value="",
+            key="bridge_transfer_box",
+            label_visibility="collapsed",
+            height=1,
+        )
+
+        # Process incoming bridge data from JS
+        if bridge_result and bridge_result.strip():
+            try:
+                payload = json.loads(bridge_result)
+                if payload.get("action") == "add_bridge":
+                    # Save history for undo
+                    if 'bridge_lines_history' not in st.session_state:
+                        st.session_state.bridge_lines_history = []
+                    st.session_state.bridge_lines_history.append(
+                        list(st.session_state.interactive_lines))
+
+                    # Update lines (offset lines split, body/hole unchanged)
+                    st.session_state.interactive_lines = payload["lines"]
+
+                    # Add connector
+                    conn = payload["connector"]
+                    st.session_state.manual_connectors.append({
+                        'type': 'precise_sandglass_arc',
+                        'left_center': Point(conn['lx'], conn['ly']),
+                        'right_center': Point(conn['rx'], conn['ry']),
+                        'radius': conn['r'],
+                        'base_angle': conn['ang'],
+                    })
+                    # Clear the textarea and rerun to refresh canvas with new state
+                    st.session_state.bridge_transfer_box = ""
+                    st.rerun()
+            except Exception:
+                pass
+
+        # ── Serialize current state for canvas ──
+        all_lines_json = json.dumps(
+            [{"c": l["coords"], "t": l["type"], "id": l["id"]}
+             for l in st.session_state.interactive_lines])
         connectors_json = json.dumps([{
             'lx': b['left_center'].x, 'ly': b['left_center'].y,
             'rx': b['right_center'].x, 'ry': b['right_center'].y,
             'r': b['radius'], 'ang': b['base_angle']
         } for b in st.session_state.manual_connectors])
 
-        st.markdown(f"""
-        <div style="margin-bottom:10px; color:#565f89; font-size:13px;">
-            線段總數：{len(st.session_state.interactive_lines)} 條 ｜
-            橋接數：{len(st.session_state.manual_connectors)} 個 ｜
-            板子：{cW:.1f} × {cH:.1f} mm
-        </div>
-        """, unsafe_allow_html=True)
-
-        col_canvas, col_ctrl = st.columns([4, 1])
-        with col_ctrl:
-            st.markdown("**操作說明**")
-            st.markdown("""
-            <div style="font-size:12px; color:#6b7599; line-height:1.8">
-            🖱️ 左鍵：選線段<br>
-            🖱️ 滾輪：縮放<br>
-            🖱️ 中鍵拖曳：平移<br>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("↩️ 撤銷", use_container_width=True):
-                if st.session_state.manual_connectors:
-                    st.session_state.manual_connectors.pop()
-                st.rerun()
-            if st.button("🔄 全部復原", use_container_width=True):
-                st.session_state.manual_connectors = []
-                st.session_state.interactive_lines = []
-                st.rerun()
-
-        with col_canvas:
-            bridge_html = f"""
-<div style="background:#1a1b26; border-radius:10px; padding:8px;">
-<canvas id="bridge_canvas" width="1600" height="900"
-  style="width:100%; border-radius:8px; cursor:crosshair; background:#000;"></canvas>
-<div id="bridge_status" style="padding:8px 12px; font-size:12px; color:#7dcfff; font-family:monospace;">
-  提示：左鍵點選兩條 offset 線段以建立橋接
+        # ── Canvas component ──
+        # The JS does full bridge geometry (split offset lines, create arc connector)
+        # and writes the result back to the hidden textarea, triggering st.rerun()
+        bridge_html = f"""
+<style>
+#bc_wrap {{ background:#1a1b26; border-radius:10px; padding:8px; }}
+#bridge_canvas {{ display:block; width:100%; border-radius:8px;
+                  cursor:crosshair; background:#000; }}
+#bc_status {{ padding:8px 12px; font-size:12px; color:#7dcfff;
+              font-family:'JetBrains Mono',monospace; }}
+</style>
+<div id="bc_wrap">
+  <canvas id="bridge_canvas" width="1600" height="900"></canvas>
+  <div id="bc_status">提示：左鍵點選兩條線段以建立橋接 ｜ 滾輪縮放 ｜ 中鍵拖曳平移</div>
 </div>
-</div>
+
 <script>
-const allLines = {all_lines_json};
-const bridgeList = {connectors_json};
-const panelW = {cW}, panelH = {cH};
+// ── State ──
+let allLines    = {all_lines_json};
+let bridgeList  = {connectors_json};
+const panelW    = {cW}, panelH = {cH};
+const GAP_HALF  = 1.75;
+
 const canvas = document.getElementById('bridge_canvas');
-const ctx = canvas.getContext('2d');
+const ctx    = canvas.getContext('2d');
+
 let scale=1, offsetX=0, offsetY=0;
 let isDrag=false, lastX=0, lastY=0;
 let selected=[], hoverIdx=-1, firstPt=null;
@@ -835,85 +885,261 @@ const TYPE_COLOR = {{
   offset:{{n:'#2ac3de', g:'#2ac3de'}},
 }};
 
-function zoomReset(){{
-  const s=Math.min(760/panelW, 440/panelH);
-  scale=s; offsetX=(800-panelW*s)/2; offsetY=(450+panelH*s)/2; draw();
-}}
+// ── Coordinate helpers ──
 function toX(x){{return offsetX+x*scale;}}
 function toY(y){{return offsetY-y*scale;}}
 function fromX(x){{return(x-offsetX)/scale;}}
 function fromY(y){{return(offsetY-y)/scale;}}
 
+function zoomReset(){{
+  const s=Math.min(760/panelW,440/panelH);
+  scale=s; offsetX=(800-panelW*s)/2; offsetY=(450+panelH*s)/2; draw();
+}}
+
+// ── Draw ──
 function draw(){{
   ctx.setTransform(2,0,0,2,0,0);
   ctx.clearRect(0,0,800,450);
   const dw=Math.max(0.5,Math.min(1.4/Math.pow(scale/8,0.4),2.5));
+
   allLines.forEach((l,i)=>{{
-    const s=TYPE_COLOR[l.t]||TYPE_COLOR.body;
+    const st=TYPE_COLOR[l.t]||TYPE_COLOR.body;
     const isS=selected.includes(i), isH=(i===hoverIdx);
     ctx.beginPath();
     ctx.moveTo(toX(l.c[0][0]),toY(l.c[0][1]));
     ctx.lineTo(toX(l.c[1][0]),toY(l.c[1][1]));
     if(isS){{ctx.strokeStyle='#ff007c';ctx.lineWidth=dw*3;ctx.shadowBlur=0;}}
-    else if(isH){{ctx.strokeStyle=s.n;ctx.lineWidth=dw*2.5;ctx.shadowBlur=8;ctx.shadowColor=s.g;}}
-    else{{ctx.strokeStyle=s.n;ctx.lineWidth=(l.t==='offset')?dw*0.8:dw;ctx.shadowBlur=0;}}
-    ctx.stroke();ctx.shadowBlur=0;
+    else if(isH){{ctx.strokeStyle=st.n;ctx.lineWidth=dw*2.5;ctx.shadowBlur=8;ctx.shadowColor=st.g;}}
+    else{{ctx.strokeStyle=st.n;ctx.lineWidth=(l.t==='offset')?dw*0.8:dw;ctx.shadowBlur=0;}}
+    ctx.stroke(); ctx.shadowBlur=0;
   }});
+
   bridgeList.forEach(b=>{{
-    ctx.strokeStyle='#ffff00';ctx.lineWidth=dw*1.5;
+    ctx.strokeStyle='#ffff00'; ctx.lineWidth=dw*1.5;
     const rad=b.r*scale, ar=b.ang*Math.PI/180;
-    ctx.beginPath();ctx.arc(toX(b.lx),toY(b.ly),rad,-ar-Math.PI/2,-ar+Math.PI/2);ctx.stroke();
-    ctx.beginPath();ctx.arc(toX(b.rx),toY(b.ry),rad,-ar+Math.PI/2,-ar+1.5*Math.PI);ctx.stroke();
+    ctx.beginPath(); ctx.arc(toX(b.lx),toY(b.ly),rad,-ar-Math.PI/2,-ar+Math.PI/2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(toX(b.rx),toY(b.ry),rad,-ar+Math.PI/2,-ar+1.5*Math.PI); ctx.stroke();
   }});
-  ctx.strokeStyle='#2d3f76';ctx.lineWidth=1;ctx.setLineDash([8,4]);
-  ctx.strokeRect(toX(0),toY(panelH),panelW*scale,panelH*scale);ctx.setLineDash([]);
-  if(firstPt){{ctx.fillStyle='#ff007c';ctx.beginPath();ctx.arc(toX(firstPt.x),toY(firstPt.y),4,0,7);ctx.fill();}}
+
+  ctx.strokeStyle='#2d3f76'; ctx.lineWidth=1; ctx.setLineDash([8,4]);
+  ctx.strokeRect(toX(0),toY(panelH),panelW*scale,panelH*scale);
+  ctx.setLineDash([]);
+
+  if(firstPt){{
+    ctx.fillStyle='#ff007c';
+    ctx.beginPath(); ctx.arc(toX(firstPt.x),toY(firstPt.y),4,0,7); ctx.fill();
+  }}
 }}
 
-canvas.addEventListener('contextmenu',e=>e.preventDefault());
-canvas.onmousedown=e=>{{
-  if(e.button===1){{isDrag=true;lastX=e.clientX;lastY=e.clientY;e.preventDefault();}}
-  else if(e.button===0&&hoverIdx!==-1){{
-    const r=canvas.getBoundingClientRect();
-    const rx=fromX(e.clientX-r.left),ry=fromY(e.clientY-r.top);
-    if(selected.length===0){{selected=[hoverIdx];firstPt={{x:rx,y:ry}};}}
-    else{{
-      const l1=allLines[selected[0]],l2=allLines[hoverIdx];
-      if(l1&&l2){{
-        document.getElementById('bridge_status').textContent='✅ 橋接已建立（請重新執行 Tab 3 輸出）';
+// ── Geometry helpers (all bridge math done in JS) ──
+function ptOnLine(px,py,ax,ay,bx,by){{
+  // project point onto segment, return {{x,y,t}}
+  const dx=bx-ax, dy=by-ay, d2=dx*dx+dy*dy;
+  if(d2===0) return {{x:ax,y:ay,t:0}};
+  const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/d2));
+  return {{x:ax+t*dx, y:ay+t*dy, t}};
+}}
+
+function lineLengthPt(coords, pt){{
+  // arc-length from start of polyline to projected point
+  const ax=coords[0][0],ay=coords[0][1],bx=coords[1][0],by=coords[1][1];
+  const dx=bx-ax,dy=by-ay;
+  const len=Math.sqrt(dx*dx+dy*dy);
+  const proj=ptOnLine(pt.x,pt.y,ax,ay,bx,by);
+  return proj.t*len;
+}}
+
+function lineLength(coords){{
+  const dx=coords[1][0]-coords[0][0], dy=coords[1][1]-coords[0][1];
+  return Math.sqrt(dx*dx+dy*dy);
+}}
+
+function interpLine(coords,d){{
+  // point at arc-distance d along segment
+  const len=lineLength(coords);
+  const t=len===0?0:Math.max(0,Math.min(1,d/len));
+  return [coords[0][0]+t*(coords[1][0]-coords[0][0]),
+          coords[0][1]+t*(coords[1][1]-coords[0][1])];
+}}
+
+function splitLine(line, projPt){{
+  // Split a 2-point segment at projPt±GAP_HALF
+  const d=lineLengthPt(line.c, projPt);
+  const len=lineLength(line.c);
+  const segs=[];
+  if(d>GAP_HALF){{
+    const s=interpLine(line.c,0);
+    const e=interpLine(line.c,d-GAP_HALF);
+    segs.push({{id:uid(),coords:[s,e],type:line.t}});
+  }}
+  if(d+GAP_HALF<len){{
+    const s=interpLine(line.c,d+GAP_HALF);
+    const e=interpLine(line.c,len);
+    segs.push({{id:uid(),coords:[s,e],type:line.t}});
+  }}
+  return segs;
+}}
+
+function uid(){{return Math.random().toString(36).slice(2);}}
+
+// ── Bridge calculation ──
+function buildBridge(idx1, pt1, idx2){{
+  const l1data = allLines[idx1];
+  const l2data = allLines[idx2];
+
+  // Project pt1 onto l1, then project that point onto l2
+  const p1 = ptOnLine(pt1.x,pt1.y, l1data.c[0][0],l1data.c[0][1],
+                                     l1data.c[1][0],l1data.c[1][1]);
+  const p2 = ptOnLine(p1.x,p1.y, l2data.c[0][0],l2data.c[0][1],
+                                   l2data.c[1][0],l2data.c[1][1]);
+
+  // Mid-gap centre
+  const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+
+  // Tangent direction from l1
+  const v1x=l1data.c[1][0]-l1data.c[0][0];
+  const v1y=l1data.c[1][1]-l1data.c[0][1];
+  const vlen=Math.sqrt(v1x*v1x+v1y*v1y);
+  const ux=v1x/vlen, uy=v1y/vlen;
+  const angDeg=Math.atan2(uy,ux)*180/Math.PI;
+
+  // Split lines (body/hole unchanged, only offset gets cut)
+  let newLines = allLines.filter((_,i)=>i!==idx1&&i!==idx2);
+
+  if(l1data.t==='body'||l1data.t==='hole'){{
+    newLines.push({{id:uid(),coords:l1data.c,type:l1data.t}});
+  }} else {{
+    newLines = newLines.concat(splitLine(l1data,p1));
+  }}
+
+  if(l2data.t==='body'||l2data.t==='hole'){{
+    newLines.push({{id:uid(),coords:l2data.c,type:l2data.t}});
+  }} else {{
+    newLines = newLines.concat(splitLine(l2data,p2));
+  }}
+
+  const connector = {{
+    lx: mx-ux*GAP_HALF, ly: my-uy*GAP_HALF,
+    rx: mx+ux*GAP_HALF, ry: my+uy*GAP_HALF,
+    r: 1.0, ang: angDeg
+  }};
+
+  return {{newLines, connector}};
+}}
+
+// ── Send result back to Streamlit via hidden textarea ──
+function sendToStreamlit(newLines, connector){{
+  const payload = JSON.stringify({{
+    action: "add_bridge",
+    lines: newLines.map(l=>{{
+      // normalise coord format to [[x,y],[x,y]]
+      const c0 = Array.isArray(l.coords[0]) ? l.coords[0] : [l.coords[0].x, l.coords[0].y];
+      const c1 = Array.isArray(l.coords[1]) ? l.coords[1] : [l.coords[1].x, l.coords[1].y];
+      return {{id:l.id||uid(), coords:[c0,c1], type:l.type}};
+    }}),
+    connector
+  }});
+
+  // Find the hidden textarea in the Streamlit DOM and update it
+  // Streamlit uses shadow DOM / iframes — we target the parent window's textarea
+  const textareas = window.parent.document.querySelectorAll('textarea');
+  let found = false;
+  textareas.forEach(ta => {{
+    if(ta.value === '' || ta.dataset.bridgeTarget) {{
+      // pick the first empty one (our hidden one is always empty between submissions)
+      if(!found) {{
+        found = true;
+        ta.dataset.bridgeTarget = '1';
+        // React/Streamlit needs a native input event to detect the change
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+          window.parent.HTMLTextAreaElement.prototype, 'value').set;
+        nativeInputValueSetter.call(ta, payload);
+        ta.dispatchEvent(new Event('input', {{bubbles:true}}));
       }}
-      selected=[];firstPt=null;
+    }}
+  }});
+
+  if(!found){{
+    document.getElementById('bc_status').textContent =
+      '⚠️ 無法回傳資料，請確認 Streamlit 版本 ≥ 1.32';
+  }}
+}}
+
+// ── Event handlers ──
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+
+canvas.onmousedown = e => {{
+  if(e.button===1){{
+    isDrag=true; lastX=e.clientX; lastY=e.clientY; e.preventDefault();
+  }} else if(e.button===0 && hoverIdx!==-1){{
+    const r=canvas.getBoundingClientRect();
+    const rx=fromX(e.clientX-r.left), ry=fromY(e.clientY-r.top);
+
+    if(selected.length===0){{
+      selected=[hoverIdx]; firstPt={{x:rx,y:ry}};
+      document.getElementById('bc_status').textContent=
+        `已選第一條線 (idx ${{hoverIdx}}, type: ${{allLines[hoverIdx].t}}) — 再選第二條`;
+    }} else {{
+      if(hoverIdx === selected[0]){{
+        selected=[]; firstPt=null;
+        document.getElementById('bc_status').textContent='取消選取';
+      }} else {{
+        document.getElementById('bc_status').textContent='計算橋接中...';
+        const {{newLines, connector}} = buildBridge(selected[0], firstPt, hoverIdx);
+
+        // Update local state immediately for visual feedback
+        allLines = newLines;
+        bridgeList = [...bridgeList, connector];
+        selected=[]; firstPt=null;
+        draw();
+
+        document.getElementById('bc_status').textContent=
+          `✅ 橋接已建立，同步回 Python 中...`;
+
+        // Send to Python
+        sendToStreamlit(newLines, connector);
+      }}
     }}
     draw();
   }}
 }};
-window.onmouseup=()=>isDrag=false;
-canvas.onmousemove=e=>{{
+
+window.onmouseup = () => isDrag=false;
+
+canvas.onmousemove = e => {{
   const r=canvas.getBoundingClientRect();
-  const rx=fromX(e.clientX-r.left),ry=fromY(e.clientY-r.top);
-  if(isDrag){{offsetX+=e.clientX-lastX;offsetY+=e.clientY-lastY;lastX=e.clientX;lastY=e.clientY;draw();}}
-  else{{
-    let lh=hoverIdx;hoverIdx=-1;let md=16/scale;
+  const rx=fromX(e.clientX-r.left), ry=fromY(e.clientY-r.top);
+  if(isDrag){{
+    offsetX+=e.clientX-lastX; offsetY+=e.clientY-lastY;
+    lastX=e.clientX; lastY=e.clientY; draw();
+  }} else {{
+    let lh=hoverIdx; hoverIdx=-1; let md=16/scale;
     allLines.forEach((l,i)=>{{
-      const dx=l.c[0][0]-l.c[1][0],dy=l.c[0][1]-l.c[1][1],d2=dx*dx+dy*dy;
-      let t=d2===0?0:Math.max(0,Math.min(1,((rx-l.c[0][0])*(l.c[1][0]-l.c[0][0])+(ry-l.c[0][1])*(l.c[1][1]-l.c[0][1]))/d2));
-      const d=Math.sqrt((rx-(l.c[0][0]+t*(l.c[1][0]-l.c[0][0])))**2+(ry-(l.c[0][1]+t*(l.c[1][1]-l.c[0][1])))**2);
+      const dx=l.c[0][0]-l.c[1][0], dy=l.c[0][1]-l.c[1][1], d2=dx*dx+dy*dy;
+      let t=d2===0?0:Math.max(0,Math.min(1,
+        ((rx-l.c[0][0])*(l.c[1][0]-l.c[0][0])+(ry-l.c[0][1])*(l.c[1][1]-l.c[0][1]))/d2));
+      const d=Math.sqrt(
+        (rx-(l.c[0][0]+t*(l.c[1][0]-l.c[0][0])))**2+
+        (ry-(l.c[0][1]+t*(l.c[1][1]-l.c[0][1])))**2);
       if(d<md){{md=d;hoverIdx=i;}}
     }});
-    if(lh!==hoverIdx)draw();
+    if(lh!==hoverIdx) draw();
   }}
 }};
-canvas.onwheel=e=>{{
-  e.preventDefault();const r=canvas.getBoundingClientRect();
-  const mx=e.clientX-r.left,my=e.clientY-r.top;
+
+canvas.onwheel = e => {{
+  e.preventDefault();
+  const r=canvas.getBoundingClientRect();
+  const mx=e.clientX-r.left, my=e.clientY-r.top;
   const w=e.deltaY<0?1.15:0.85;
-  const wx=fromX(mx),wy=fromY(my);
-  scale*=w;offsetX=mx-wx*scale;offsetY=my+wy*scale;draw();
+  const wx=fromX(mx), wy=fromY(my);
+  scale*=w; offsetX=mx-wx*scale; offsetY=my+wy*scale; draw();
 }};
+
 zoomReset();
 </script>
 """
-            st.components.v1.html(bridge_html, height=560, scrolling=False)
+        st.components.v1.html(bridge_html, height=560, scrolling=False)
 
 # ══════════════════════════════════════════════
 # TAB 3 — DXF output
