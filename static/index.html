@@ -303,10 +303,10 @@ async function runNesting(){
 // NEST CANVAS
 // ─────────────────────────────────────────────
 const nestState={polys:[],compW:0,compH:0,scale:1,ox:0,oy:0,drag:false,lx:0,ly:0};
+const nc=document.getElementById('nest-canvas');
 
 function nestZoomReset(){
-  const c=document.getElementById('nest-canvas');
-  const cw=c.clientWidth,ch=c.clientHeight;
+  const cw=nc.clientWidth, ch=nc.clientHeight;
   if(!nestState.compW||!nestState.compH)return;
   const s=Math.min((cw-40)/nestState.compW,(ch-40)/nestState.compH);
   nestState.scale=s;
@@ -316,13 +316,14 @@ function nestZoomReset(){
 }
 
 function nestDrawAll(){
-  const canvas=document.getElementById('nest-canvas');
   const dpr=window.devicePixelRatio||1;
-  canvas.width=canvas.clientWidth*dpr;
-  canvas.height=canvas.clientHeight*dpr;
-  const ctx=canvas.getContext('2d');
-  ctx.scale(dpr,dpr);
-  const cw=canvas.clientWidth,ch=canvas.clientHeight;
+  if(nc.width!==nc.clientWidth*dpr||nc.height!==nc.clientHeight*dpr){
+    nc.width=nc.clientWidth*dpr;
+    nc.height=nc.clientHeight*dpr;
+  }
+  const ctx=nc.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  const cw=nc.clientWidth, ch=nc.clientHeight;
   const {scale:s,ox,oy,compW,compH}=nestState;
   if(!compW)return;
   ctx.clearRect(0,0,cw,ch);
@@ -357,12 +358,11 @@ function nestDrawAll(){
 }
 
 // Nest canvas events
-const nc=document.getElementById('nest-canvas');
 nc.onwheel=e=>{
   e.preventDefault();
-  const r=nc.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
-  const mx=(e.clientX-r.left),my=(e.clientY-r.top);
-  const wx=(mx-nestState.ox)/nestState.scale,wy=(nestState.oy-my)/nestState.scale;
+  const r=nc.getBoundingClientRect();
+  const mx=e.clientX-r.left, my=e.clientY-r.top;
+  const wx=(mx-nestState.ox)/nestState.scale, wy=(nestState.oy-my)/nestState.scale;
   const w=e.deltaY<0?1.15:.85;
   nestState.scale*=w;
   nestState.ox=mx-wx*nestState.scale;
@@ -450,8 +450,7 @@ const TYPE_COLOR={
 };
 
 function bridgeZoomReset(){
-  const c=document.getElementById('bridge-canvas');
-  const cw=c.clientWidth,ch=c.clientHeight;
+  const cw=bc.clientWidth, ch=bc.clientHeight;
   if(!bridgeState.compW)return;
   const s=Math.min((cw-40)/bridgeState.compW,(ch-40)/bridgeState.compH);
   bridgeState.scale=s;
@@ -461,18 +460,21 @@ function bridgeZoomReset(){
 }
 
 function bridgeDrawAll(){
-  const canvas=document.getElementById('bridge-canvas');
   const dpr=window.devicePixelRatio||1;
-  canvas.width=canvas.clientWidth*dpr;
-  canvas.height=canvas.clientHeight*dpr;
-  const ctx=canvas.getContext('2d');
-  ctx.scale(dpr,dpr);
-  const cw=canvas.clientWidth,ch=canvas.clientHeight;
+  if(bc.width!==bc.clientWidth*dpr||bc.height!==bc.clientHeight*dpr){
+    bc.width=bc.clientWidth*dpr;
+    bc.height=bc.clientHeight*dpr;
+  }
+  const ctx=bc.getContext('2d');
+  // 每次都重設 transform，確保 DPR 正確
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  const cw=bc.clientWidth, ch=bc.clientHeight;
   const {scale:s,ox,oy,lines,connectors,hover,selected,firstPt,compW,compH}=bridgeState;
   ctx.clearRect(0,0,cw,ch);
   ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);
   if(!compW)return;
 
+  // 座標轉換全用 CSS 像素（setTransform 已處理 DPR）
   const tx=x=>ox+x*s, ty=y=>oy-y*s;
   const dw=Math.max(.5,Math.min(1.4/Math.pow(s/8,.4),2.5));
 
@@ -504,7 +506,7 @@ function bridgeDrawAll(){
   }
 }
 
-// Bridge mouse helpers
+// Bridge mouse helpers — fromBX/fromBY 用 CSS 像素，不需要除以 DPR
 const bc=document.getElementById('bridge-canvas');
 function fromBX(cx){const r=bc.getBoundingClientRect();return(cx-r.left-bridgeState.ox)/bridgeState.scale;}
 function fromBY(cy){const r=bc.getBoundingClientRect();return(bridgeState.oy-(cy-r.top))/bridgeState.scale;}
