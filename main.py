@@ -612,6 +612,8 @@ async def nest(params: dict):
                                          [round(fc[i+1][0],4),round(fc[i+1][1],4)]],
                                "type":"frame","kind":"line"})
             SESSION['interactive_lines'] = lines
+
+            top3_data = []
             for c in top3:
                 p1, p2 = c[3][0], c[3][1]
                 top3_data.append({
