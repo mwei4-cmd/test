@@ -209,35 +209,24 @@ def run_nesting(raw_poly, params, progress_cb=None):
 def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
     """
     Builds interactive segments for the bridge canvas.
-
-    Body/hole/offset positions come entirely from the placed Shapely polygons
-    (fps) — guaranteed correct for both Nesting and Matrix modes.
-
-    Additionally, for DXF arc/circle entities, we compute the arc's world
-    position via the transform (shift→rotate→translate to poly.centroid)
-    and emit an extra arc segment so the canvas draws a smooth circle
-    instead of a Shapely-flattened polyline.
-
-    Strategy per entity type:
-      - Arc/Circle  → emit arc segment (smooth canvas rendering)
-      - Line/Other  → emit line segments from Shapely poly coords (accurate)
-    Offset         → always poly.buffer(2, join_style=2) from Shapely (accurate)
+    - Body/hole arcs: from DXF CIRCLE/ARC, positioned via transform
+    - Body/hole lines: from Shapely poly.exterior / poly.interiors
+      but ONLY for non-arc DXF entities (no duplication)
+    - Offset: poly.buffer(2) exterior ONLY (no interiors = no hole offset)
     """
     import math as _math
 
     lines = []
 
-    # ── Read DXF to find arc entities (for smooth rendering only) ────
-    dxf_arcs = []  # list of {"cx","cy","r","a0","a1"} in original DXF coords
+    # ── Read DXF entities ──────────────────────────────────
+    dxf_arcs = []     # CIRCLE / ARC entities → rendered as smooth arcs
+    has_non_arc = False  # whether there are LINE/LWPOLYLINE etc.
     try:
         doc = ezdxf.readfile(src_path)
         msp = doc.modelspace()
-        entities = msp.query('*[layer=="BOARD_OUTLINE_00"]')
+        entities = list(msp.query('*[layer=="BOARD_OUTLINE_00"]'))
         if not entities:
-            entities = msp.query('CIRCLE ARC')
-        else:
-            # filter to only arc types
-            entities = [e for e in entities if e.dxftype() in ('CIRCLE','ARC')]
+            entities = list(msp.query('LWPOLYLINE POLYLINE CIRCLE ELLIPSE SPLINE ARC LINE'))
         for ent in entities:
             t = ent.dxftype()
             if t == 'CIRCLE':
@@ -248,6 +237,8 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
                 c = ent.dxf.center
                 dxf_arcs.append({"cx":c.x,"cy":c.y,"r":ent.dxf.radius,
                                   "a0":ent.dxf.start_angle,"a1":ent.dxf.end_angle})
+            else:
+                has_non_arc = True
     except: pass
 
     ocx, ocy = cx_cy_orig
@@ -263,48 +254,62 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
             ry = bx * sin_a + by * cos_a
             return rx + pcx, ry + pcy
 
-        # ── Body: emit arc segments for DXF arcs (smooth rendering) ──
-        # For non-arc entities, body lines come from poly.exterior below
-        placed_arc_ids = set()
+        # ── Arc segments (DXF CIRCLE/ARC → smooth canvas rendering) ──
+        # Track which arcs are holes so we skip their interiors in Shapely lines
+        hole_arc_centres = []  # (cx, cy, r) of hole arcs in world coords
+
         for arc in dxf_arcs:
             ncx, ncy = world_pt(arc["cx"], arc["cy"])
             a0 = (arc["a0"] + ang_deg) % 360
             a1 = (arc["a1"] + ang_deg) % 360
-            is_hole = poly.contains(Point(ncx, ncy))
+
+            # A circle/arc centre is a hole if it falls inside a poly interior ring
+            is_hole = any(
+                Polygon(h).contains(Point(ncx, ncy))
+                for h in poly.interiors
+            )
+            # Also check: point inside exterior but poly.contains() is False = hole
+            if not is_hole and poly.exterior.distance(Point(ncx, ncy)) > 0.01:
+                if not poly.contains(Point(ncx, ncy)):
+                    # inside the bounding exterior but excluded by a hole ring
+                    is_hole = True
+
             seg_type = "hole" if is_hole else "body"
-            sid = str(uuid.uuid4())
-            placed_arc_ids.add((round(ncx,2), round(ncy,2), round(arc["r"],2)))
-            lines.append({"id":sid, "type":seg_type, "kind":"arc",
+            if is_hole:
+                hole_arc_centres.append((round(ncx, 2), round(ncy, 2), round(arc["r"], 2)))
+
+            lines.append({"id":str(uuid.uuid4()), "type":seg_type, "kind":"arc",
                            "cx":round(ncx,4), "cy":round(ncy,4),
                            "r":round(arc["r"],4),
                            "a0":round(a0,4), "a1":round(a1,4)})
 
-        # ── Body/Hole lines from Shapely exterior/interiors ──
-        # Skip segments that are already covered by a DXF arc
-        # (rough check: if the midpoint is within 0.1mm of an arc, skip)
-        def near_arc(mx, my):
-            for (acx, acy, ar) in placed_arc_ids:
-                if abs(_math.sqrt((mx-acx)**2+(my-acy)**2) - ar) < 0.2:
-                    return True
-            return False
-
-        ec = list(poly.exterior.coords)
-        for i in range(len(ec)-1):
-            mx2, my2 = (ec[i][0]+ec[i+1][0])/2, (ec[i][1]+ec[i+1][1])/2
-            if not near_arc(mx2, my2):
+        # ── Line segments from Shapely — only when non-arc entities exist ──
+        if has_non_arc:
+            ec = list(poly.exterior.coords)
+            for i in range(len(ec)-1):
                 lines.append({"id":str(uuid.uuid4()), "type":"body", "kind":"line",
                                "coords":[[round(ec[i][0],4),round(ec[i][1],4)],
                                          [round(ec[i+1][0],4),round(ec[i+1][1],4)]]})
-        for hole in poly.interiors:
-            hc = list(hole.coords)
-            for i in range(len(hc)-1):
-                mx2, my2 = (hc[i][0]+hc[i+1][0])/2, (hc[i][1]+hc[i+1][1])/2
-                if not near_arc(mx2, my2):
+
+            # Skip interior rings that are already covered by a hole arc
+            for hole in poly.interiors:
+                hc = list(hole.coords)
+                # Find centroid of this interior ring
+                hpoly = Polygon(hc)
+                hcx, hcy = round(hpoly.centroid.x, 2), round(hpoly.centroid.y, 2)
+                # Check if a hole arc already covers this ring
+                covered = any(
+                    abs(_math.sqrt((hcx - acx)**2 + (hcy - acy)**2) - ar) < 0.5
+                    for (acx, acy, ar) in hole_arc_centres
+                )
+                if covered:
+                    continue  # arc already drawn, skip Shapely polyline
+                for i in range(len(hc)-1):
                     lines.append({"id":str(uuid.uuid4()), "type":"hole", "kind":"line",
                                    "coords":[[round(hc[i][0],4),round(hc[i][1],4)],
                                              [round(hc[i+1][0],4),round(hc[i+1][1],4)]]})
 
-        # ── Offset: always Shapely buffer — accurate for both modes ──
+        # ── Offset: exterior buffer only, no hole inward offset ──
         try:
             op = poly.buffer(2, join_style=2)
             oc = list(op.exterior.coords)
@@ -312,15 +317,11 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
                 lines.append({"id":str(uuid.uuid4()), "type":"offset", "kind":"line",
                                "coords":[[round(oc[i][0],4),round(oc[i][1],4)],
                                          [round(oc[i+1][0],4),round(oc[i+1][1],4)]]})
-            for h in op.interiors:
-                hc2 = list(h.coords)
-                for i in range(len(hc2)-1):
-                    lines.append({"id":str(uuid.uuid4()), "type":"offset", "kind":"line",
-                                   "coords":[[round(hc2[i][0],4),round(hc2[i][1],4)],
-                                             [round(hc2[i+1][0],4),round(hc2[i+1][1],4)]]})
+            # Note: op.interiors would be inward hole offsets — not needed
         except: pass
 
     return lines
+
 
 
 
