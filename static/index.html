@@ -983,8 +983,23 @@ function bridgeDrawAll(){
     const st=TYPE_COLOR[l.type]||TYPE_COLOR.body;
     const isS=selected.includes(i), isH=(i===hover);
     ctx.beginPath();
-    ctx.moveTo(tx(l.coords[0][0]),ty(l.coords[0][1]));
-    ctx.lineTo(tx(l.coords[1][0]),ty(l.coords[1][1]));
+
+    if(l.kind==='arc'){
+      // DXF arcs: angles are in degrees, Y-axis is flipped for canvas
+      // In canvas coords Y is flipped so arc goes clockwise for CCW DXF arc
+      const a0=l.a0*Math.PI/180, a1=l.a1*Math.PI/180;
+      const cx2=tx(l.cx), cy2=ty(l.cy), r2=l.r*s;
+      if(Math.abs(l.a1-l.a0)>=359.9){
+        ctx.arc(cx2,cy2,r2,0,Math.PI*2);
+      } else {
+        // negate angles because canvas Y is flipped
+        ctx.arc(cx2,cy2,r2,-a0,-a1,true);
+      }
+    } else {
+      ctx.moveTo(tx(l.coords[0][0]),ty(l.coords[0][1]));
+      ctx.lineTo(tx(l.coords[1][0]),ty(l.coords[1][1]));
+    }
+
     if(isS){ctx.strokeStyle='#ffffff';ctx.lineWidth=dw*3;ctx.shadowBlur=0;}
     else if(isH){ctx.strokeStyle=st.g;ctx.lineWidth=dw*2.5;ctx.shadowBlur=6;ctx.shadowColor=st.g;}
     else{ctx.strokeStyle=st.n;ctx.lineWidth=(l.type==='offset')?dw*.7:dw;ctx.shadowBlur=0;}
@@ -1053,9 +1068,28 @@ bc.onmousemove=e=>{
   let lh=bridgeState.hover; bridgeState.hover=-1;
   let md=16/bridgeState.scale;
   bridgeState.lines.forEach((l,i)=>{
-    const dx=l.coords[0][0]-l.coords[1][0],dy=l.coords[0][1]-l.coords[1][1],d2=dx*dx+dy*dy;
-    let t=d2===0?0:Math.max(0,Math.min(1,((rx-l.coords[0][0])*(l.coords[1][0]-l.coords[0][0])+(ry-l.coords[0][1])*(l.coords[1][1]-l.coords[0][1]))/d2));
-    const d=Math.sqrt((rx-(l.coords[0][0]+t*(l.coords[1][0]-l.coords[0][0])))**2+(ry-(l.coords[0][1]+t*(l.coords[1][1]-l.coords[0][1])))**2);
+    let d;
+    if(l.kind==='arc'){
+      // distance from point to arc = |dist_to_centre - radius|
+      const dx=rx-l.cx, dy=ry-l.cy;
+      const distToCenter=Math.sqrt(dx*dx+dy*dy);
+      d=Math.abs(distToCenter-l.r);
+      // check if the angle is within the arc's sweep
+      if(d<md && Math.abs(l.a1-l.a0)<359.9){
+        let ang=Math.atan2(dy,dx)*180/Math.PI;
+        if(ang<0) ang+=360;
+        let a0=l.a0%360, a1=l.a1%360;
+        // normalize to check containment
+        const inArc = a1>a0 ? (ang>=a0&&ang<=a1) : (ang>=a0||ang<=a1);
+        if(!inArc) d=Infinity;
+      }
+    } else {
+      const lx0=l.coords[0][0],ly0=l.coords[0][1];
+      const lx1=l.coords[1][0],ly1=l.coords[1][1];
+      const ldx=lx0-lx1, ldy=ly0-ly1, d2=ldx*ldx+ldy*ldy;
+      let t=d2===0?0:Math.max(0,Math.min(1,((rx-lx0)*(lx1-lx0)+(ry-ly0)*(ly1-ly0))/d2));
+      d=Math.sqrt((rx-(lx0+t*(lx1-lx0)))**2+(ry-(ly0+t*(ly1-ly0)))**2);
+    }
     if(d<md){md=d;bridgeState.hover=i;}
   });
   if(lh!==bridgeState.hover)bridgeDrawAll();
