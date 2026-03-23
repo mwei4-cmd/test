@@ -946,9 +946,10 @@ const bridgeState={
 };
 
 const TYPE_COLOR={
-  body:{n:'#e0e0e0',g:'#ffffff'},
-  hole:{n:'#606060',g:'#909090'},
-  offset:{n:'#484848',g:'#686868'},
+  body:  {n:'#e8e8e8', g:'#ffffff'},
+  hole:  {n:'#e8e8e8', g:'#ffffff'},
+  offset:{n:'#2ac3de', g:'#5ad8ec'},
+  frame: {n:'#383838', g:'#505050'},  // dark grey, not selectable
 };
 
 function bridgeZoomReset(){
@@ -977,22 +978,26 @@ function bridgeDrawAll(){
   if(!compW)return;
 
   const tx=x=>ox+x*s, ty=y=>oy-y*s;
-  const dw=Math.max(.5,Math.min(1.4/Math.pow(s/8,.4),2.5));
+  // base line width: fixed minimum so lines never disappear at any zoom
+  const dw=Math.max(0.8, Math.min(2.0/Math.pow(s/8, 0.35), 2.5));
 
+  // ── Panel frame (always drawn first, behind parts) ──
+  ctx.strokeStyle='#2a2a2a';ctx.lineWidth=1;ctx.setLineDash([8,4]);
+  ctx.strokeRect(tx(0),ty(compH),compW*s,compH*s);
+  ctx.setLineDash([]);
+
+  // ── Line segments ──
   lines.forEach((l,i)=>{
     const st=TYPE_COLOR[l.type]||TYPE_COLOR.body;
     const isS=selected.includes(i), isH=(i===hover);
     ctx.beginPath();
 
     if(l.kind==='arc'){
-      // DXF arcs: angles are in degrees, Y-axis is flipped for canvas
-      // In canvas coords Y is flipped so arc goes clockwise for CCW DXF arc
-      const a0=l.a0*Math.PI/180, a1=l.a1*Math.PI/180;
       const cx2=tx(l.cx), cy2=ty(l.cy), r2=l.r*s;
-      if(Math.abs(l.a1-l.a0)>=359.9){
+      if(Math.abs(((l.a1-l.a0)+360)%360)<0.1 || Math.abs(l.a1-l.a0)>=359.9){
         ctx.arc(cx2,cy2,r2,0,Math.PI*2);
       } else {
-        // negate angles because canvas Y is flipped
+        const a0=l.a0*Math.PI/180, a1=l.a1*Math.PI/180;
         ctx.arc(cx2,cy2,r2,-a0,-a1,true);
       }
     } else {
@@ -1000,21 +1005,26 @@ function bridgeDrawAll(){
       ctx.lineTo(tx(l.coords[1][0]),ty(l.coords[1][1]));
     }
 
-    if(isS){ctx.strokeStyle='#ffffff';ctx.lineWidth=dw*3;ctx.shadowBlur=0;}
-    else if(isH){ctx.strokeStyle=st.g;ctx.lineWidth=dw*2.5;ctx.shadowBlur=6;ctx.shadowColor=st.g;}
-    else{ctx.strokeStyle=st.n;ctx.lineWidth=(l.type==='offset')?dw*.7:dw;ctx.shadowBlur=0;}
+    if(isS){
+      ctx.strokeStyle='#ffffff';ctx.lineWidth=dw*3;ctx.shadowBlur=0;
+    } else if(isH){
+      ctx.strokeStyle=st.g;ctx.lineWidth=dw*2.5;ctx.shadowBlur=6;ctx.shadowColor=st.g;
+    } else if(l.type==='offset'){
+      // offset: fixed minimum 0.8px so it never disappears
+      ctx.strokeStyle=st.n;ctx.lineWidth=Math.max(0.8,dw*0.85);ctx.shadowBlur=0;
+    } else {
+      ctx.strokeStyle=st.n;ctx.lineWidth=dw;ctx.shadowBlur=0;
+    }
     ctx.stroke();ctx.shadowBlur=0;
   });
 
+  // ── Bridge connectors ──
   connectors.forEach(b=>{
     ctx.strokeStyle='#e0e0e0';ctx.lineWidth=dw*1.5;
     const rad=b.r*s, ar=b.ang*Math.PI/180;
     ctx.beginPath();ctx.arc(tx(b.lx),ty(b.ly),rad,-ar-Math.PI/2,-ar+Math.PI/2);ctx.stroke();
     ctx.beginPath();ctx.arc(tx(b.rx),ty(b.ry),rad,-ar+Math.PI/2,-ar+1.5*Math.PI);ctx.stroke();
   });
-
-  ctx.strokeStyle='#222222';ctx.lineWidth=1;ctx.setLineDash([6,4]);
-  ctx.strokeRect(tx(0),ty(compH),compW*s,compH*s);ctx.setLineDash([]);
 
   if(firstPt){
     ctx.fillStyle='#ffffff';ctx.beginPath();
@@ -1068,6 +1078,7 @@ bc.onmousemove=e=>{
   let lh=bridgeState.hover; bridgeState.hover=-1;
   let md=16/bridgeState.scale;
   bridgeState.lines.forEach((l,i)=>{
+    if(l.type==='frame') return;  // frame not selectable
     let d;
     if(l.kind==='arc'){
       // distance from point to arc = |dist_to_centre - radius|
