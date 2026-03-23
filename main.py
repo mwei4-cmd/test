@@ -254,60 +254,66 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
             ry = bx * sin_a + by * cos_a
             return rx + pcx, ry + pcy
 
-        # ── Arc segments (DXF CIRCLE/ARC → smooth canvas rendering) ──
-        # Track which arcs are holes so we skip their interiors in Shapely lines
-        hole_arc_centres = []  # (cx, cy, r) of hole arcs in world coords
-
+        # Build list of exterior arc world-coords for quick lookup
+        exterior_arcs = []  # arcs confirmed as exterior (body)
         for arc in dxf_arcs:
             ncx, ncy = world_pt(arc["cx"], arc["cy"])
             a0 = (arc["a0"] + ang_deg) % 360
             a1 = (arc["a1"] + ang_deg) % 360
+            exterior_arcs.append({
+                "ncx":round(ncx,4), "ncy":round(ncy,4),
+                "r":round(arc["r"],4), "a0":round(a0,4), "a1":round(a1,4)
+            })
 
-            # A circle/arc centre is a hole if it falls inside a poly interior ring
-            is_hole = any(
-                Polygon(h).contains(Point(ncx, ncy))
-                for h in poly.interiors
-            )
-            # Also check: point inside exterior but poly.contains() is False = hole
-            if not is_hole and poly.exterior.distance(Point(ncx, ncy)) > 0.01:
-                if not poly.contains(Point(ncx, ncy)):
-                    # inside the bounding exterior but excluded by a hole ring
-                    is_hole = True
+        # ── Interior holes: match each ring to a DXF arc if possible ──
+        # A DXF CIRCLE that is a hole has its centre at the ring's centroid
+        matched_exterior = set()  # indices into exterior_arcs that are confirmed body
 
-            seg_type = "hole" if is_hole else "body"
-            if is_hole:
-                hole_arc_centres.append((round(ncx, 2), round(ncy, 2), round(arc["r"], 2)))
+        for hole in poly.interiors:
+            ring_poly = Polygon(hole)
+            rcx, rcy = ring_poly.centroid.x, ring_poly.centroid.y
+            # Estimate hole radius from area: r ≈ sqrt(area/π)
+            import math as _m2
+            r_est = _m2.sqrt(ring_poly.area / _m2.pi)
 
-            lines.append({"id":str(uuid.uuid4()), "type":seg_type, "kind":"arc",
-                           "cx":round(ncx,4), "cy":round(ncy,4),
-                           "r":round(arc["r"],4),
-                           "a0":round(a0,4), "a1":round(a1,4)})
+            # Find DXF arc whose world centre is close to this ring's centroid
+            best_idx, best_dist = -1, 1.0  # tolerance 1mm
+            for idx, ea in enumerate(exterior_arcs):
+                d = _m2.sqrt((ea["ncx"]-rcx)**2 + (ea["ncy"]-rcy)**2)
+                if d < best_dist and abs(ea["r"] - r_est) < r_est * 0.1 + 0.5:
+                    best_dist = d
+                    best_idx = idx
 
-        # ── Line segments from Shapely — only when non-arc entities exist ──
+            if best_idx >= 0:
+                # Match found → emit as smooth arc, mark as NOT exterior
+                ea = exterior_arcs[best_idx]
+                matched_exterior.add(best_idx)
+                lines.append({"id":str(uuid.uuid4()), "type":"hole", "kind":"arc",
+                               "cx":ea["ncx"], "cy":ea["ncy"],
+                               "r":ea["r"], "a0":ea["a0"], "a1":ea["a1"]})
+            else:
+                # No DXF arc match → fall back to Shapely polyline
+                hc = list(hole.coords)
+                for i in range(len(hc)-1):
+                    lines.append({"id":str(uuid.uuid4()), "type":"hole", "kind":"line",
+                                   "coords":[[round(hc[i][0],4),round(hc[i][1],4)],
+                                             [round(hc[i+1][0],4),round(hc[i+1][1],4)]]})
+
+        # ── Exterior body arcs: only those NOT matched as holes ──
+        for idx, ea in enumerate(exterior_arcs):
+            if idx in matched_exterior:
+                continue
+            lines.append({"id":str(uuid.uuid4()), "type":"body", "kind":"arc",
+                           "cx":ea["ncx"], "cy":ea["ncy"],
+                           "r":ea["r"], "a0":ea["a0"], "a1":ea["a1"]})
+
+        # ── Body lines from Shapely exterior (when non-arc entities exist) ──
         if has_non_arc:
             ec = list(poly.exterior.coords)
             for i in range(len(ec)-1):
                 lines.append({"id":str(uuid.uuid4()), "type":"body", "kind":"line",
                                "coords":[[round(ec[i][0],4),round(ec[i][1],4)],
                                          [round(ec[i+1][0],4),round(ec[i+1][1],4)]]})
-
-            # Skip interior rings that are already covered by a hole arc
-            for hole in poly.interiors:
-                hc = list(hole.coords)
-                # Find centroid of this interior ring
-                hpoly = Polygon(hc)
-                hcx, hcy = round(hpoly.centroid.x, 2), round(hpoly.centroid.y, 2)
-                # Check if a hole arc already covers this ring
-                covered = any(
-                    abs(_math.sqrt((hcx - acx)**2 + (hcy - acy)**2) - ar) < 0.5
-                    for (acx, acy, ar) in hole_arc_centres
-                )
-                if covered:
-                    continue  # arc already drawn, skip Shapely polyline
-                for i in range(len(hc)-1):
-                    lines.append({"id":str(uuid.uuid4()), "type":"hole", "kind":"line",
-                                   "coords":[[round(hc[i][0],4),round(hc[i][1],4)],
-                                             [round(hc[i+1][0],4),round(hc[i+1][1],4)]]})
 
         # ── Offset: exterior buffer only, no hole inward offset ──
         try:
