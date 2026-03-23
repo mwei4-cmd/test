@@ -355,15 +355,15 @@ input[type=range]{
 
 /* shared stat typography */
 .stat-label{
-  font-size:9px;
-  color:var(--text4);
+  font-size:11px;
+  color:var(--text3);
   text-transform:uppercase;
-  letter-spacing:.15em;
+  letter-spacing:.12em;
   font-family:var(--mono);
   white-space:nowrap;
 }
 .stat-val{
-  font-size:15px;
+  font-size:20px;
   font-weight:600;
   color:var(--text);
   font-family:var(--mono);
@@ -371,7 +371,7 @@ input[type=range]{
 }
 .stat-val.dim{color:var(--text3)}
 .stat-val.sug-val{color:var(--accent)}
-.stat-unit{font-size:11px;color:var(--text3);font-weight:400;margin-left:2px}
+.stat-unit{font-size:13px;color:var(--text3);font-weight:400;margin-left:2px}
 .stat-vline{
   width:1px;
   align-self:stretch;
@@ -450,9 +450,9 @@ canvas{display:block;width:100%;height:100%}
   font-family:var(--mono);
   font-weight:600;
 }
-.dxf-table{width:100%;border-collapse:collapse;font-size:14px}
+.dxf-table{width:100%;border-collapse:collapse;font-size:15px}
 .dxf-table td{
-  padding:7px 10px;
+  padding:9px 12px;
   border-bottom:1px solid var(--border);
 }
 .dxf-table tr:last-child td{border-bottom:none}
@@ -919,15 +919,19 @@ function renderSuggest(s){
 }
 function renderStatsTable(s){
   document.getElementById('stats-table').style.display='block';
+  const suggestRows = s.suggest_w ? `
+    <tr><td>Min panel width (+1 col)</td><td>${s.suggest_w} mm &nbsp;<span style="color:var(--text3)">${s.suggest_cols} cols</span></td></tr>
+    <tr><td>Min panel height (+1 row)</td><td>${s.suggest_h} mm &nbsp;<span style="color:var(--text3)">${s.suggest_rows} rows</span></td></tr>` : '';
   document.getElementById('spec-table').innerHTML=`
     <tr><td>Part size</td><td>${s.p_w} × ${s.p_h} mm</td></tr>
+    <tr><td>Total count</td><td>${s.pcs} pcs</td></tr>
+    <tr><td>Space utilization</td><td>${s.utilization}%</td></tr>
     <tr><td>Compressed panel</td><td>${s.compressed_w} × ${s.compressed_h} mm</td></tr>
-    <tr><td>Reduction</td><td>${s.shrink_w} × ${s.shrink_h} mm</td></tr>
-    <tr><td>Min gap X / Y</td><td>${s.gap_x} / ${s.gap_y} mm</td></tr>
-    <tr><td>Margin L / R</td><td>${s.band_l} / ${s.band_r} mm</td></tr>
-    <tr><td>Margin T / B</td><td>${s.band_t} / ${s.band_b} mm</td></tr>
-    ${s.suggest_w?`<tr><td>Min width (+1 col)</td><td>${s.suggest_w} mm (${s.suggest_cols} cols)</td></tr>
-    <tr><td>Min height (+1 row)</td><td>${s.suggest_h} mm (${s.suggest_rows} rows)</td></tr>`:''}
+    <tr><td>Reduction vs. original</td><td>−${s.shrink_w} × −${s.shrink_h} mm</td></tr>
+    <tr><td>Min part gap X / Y</td><td>${s.gap_x} / ${s.gap_y} mm</td></tr>
+    <tr><td>Edge margin L / R</td><td>${s.band_l} / ${s.band_r} mm</td></tr>
+    <tr><td>Edge margin T / B</td><td>${s.band_t} / ${s.band_b} mm</td></tr>
+    ${suggestRows}
     <tr><td>Compute time</td><td>${s.elapsed} s</td></tr>
   `;
 }
