@@ -273,47 +273,115 @@ input[type=range]{
   line-height:1.4;
 }
 
-/* ── Metrics ── */
-.metrics{
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:8px;
-  padding:12px 16px;
+/* ── Nest info bar ── */
+#nest-infobar{
+  display:flex;
+  flex-direction:column;
+  border-bottom:1px solid var(--border);
   flex-shrink:0;
-}
-.metric{
   background:var(--bg2);
-  border:1px solid var(--border);
-  border-radius:4px;
-  padding:12px 14px;
 }
-.metric .label{
-  font-size:10px;
+.info-row{
+  display:flex;
+  align-items:center;
+  padding:8px 16px;
+  gap:16px;
+}
+.info-row-1{
+  border-bottom:1px solid var(--border);
+  justify-content:space-between;
+}
+.info-row-2{
+  gap:0;
+}
+.info-left{
+  display:flex;
+  align-items:center;
+  gap:0;
+}
+.stat-item{
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  padding:0 16px;
+}
+.stat-item:first-child{padding-left:0}
+.stat-label{
+  font-size:9px;
   color:var(--text4);
   text-transform:uppercase;
   letter-spacing:.15em;
-  margin-bottom:6px;
   font-family:var(--mono);
+  white-space:nowrap;
 }
-.metric .val{
-  font-family:var(--mono);
-  font-size:18px;
+.stat-val{
+  font-size:15px;
   font-weight:600;
   color:var(--text);
-}
-.metric .val.sub{font-size:14px;color:var(--text2)}
-
-.suggest-box{
-  background:var(--bg2);
-  border-left:2px solid var(--border3);
-  padding:8px 16px;
-  margin:0 16px 8px;
   font-family:var(--mono);
-  font-size:13px;
-  color:var(--text2);
-  line-height:2.0;
+  white-space:nowrap;
 }
-.suggest-box .key{color:var(--text);font-weight:600}
+.stat-val.dim{color:var(--text3)}
+.stat-unit{font-size:11px;color:var(--text3);font-weight:400;margin-left:2px}
+.stat-vline{
+  width:1px;height:28px;
+  background:var(--border);
+  flex-shrink:0;
+}
+.info-vline{
+  width:1px;height:28px;
+  background:var(--border);
+  flex-shrink:0;
+  margin:0 20px;
+}
+
+/* Best pair preview */
+#nest-best-pair{
+  display:flex;flex-direction:column;
+  align-items:center;gap:4px;flex-shrink:0;
+}
+#best-pair-label{
+  font-size:9px;color:var(--text4);
+  text-transform:uppercase;letter-spacing:.14em;
+  font-family:var(--mono);
+}
+#c3-0{
+  width:96px !important;height:54px !important;
+  border:1px solid var(--border) !important;
+  border-radius:3px;display:block !important;
+}
+
+/* Panel size flow (row 2 left) */
+.panel-flow{
+  display:flex;align-items:center;gap:10px;
+  flex-shrink:0;
+}
+.panel-size-block{
+  display:flex;flex-direction:column;gap:3px;
+}
+.flow-arrow{
+  width:24px;height:10px;
+  color:var(--border3);flex-shrink:0;margin-top:10px;
+}
+
+/* Suggest inline (row 2 right) */
+.suggest-inline{
+  display:flex;align-items:center;gap:8px;
+  font-family:var(--mono);font-size:12px;
+}
+.sug-tag{
+  font-size:9px;color:var(--text4);
+  text-transform:uppercase;letter-spacing:.14em;
+  border:1px solid var(--border2);
+  border-radius:3px;padding:1px 5px;
+  white-space:nowrap;
+}
+.sug-entry{color:var(--text2);white-space:nowrap;}
+.sug-entry b{color:var(--accent);font-weight:600;}
+.sug-sep{color:var(--border3);}
+
+/* remove old suggest-box strip */
+#suggest-box{display:none !important}
 
 /* ── Canvas ── */
 #nest-canvas-wrap,#bridge-canvas-wrap{
@@ -324,30 +392,6 @@ input[type=range]{
   border-top:1px solid var(--border);
 }
 canvas{display:block;width:100%;height:100%}
-
-/* ── Top3 ── */
-#top3-row{
-  display:flex;gap:8px;
-  padding:12px 16px;
-  flex-shrink:0;
-  border-bottom:1px solid var(--border);
-}
-.top3-card{
-  flex:1;
-  background:var(--bg2);
-  border:1px solid var(--border);
-  border-radius:4px;
-  overflow:hidden;
-}
-.top3-card canvas{display:block;width:100%;height:72px}
-.top3-label{
-  font-size:11px;
-  color:var(--text3);
-  text-align:center;
-  padding:4px;
-  font-family:var(--mono);
-  border-top:1px solid var(--border);
-}
 
 /* ── Bridge controls ── */
 #bridge-bar{
@@ -511,13 +555,52 @@ canvas{display:block;width:100%;height:100%}
 
     <!-- Nest panel -->
     <div id="panel-nest" class="panel active">
-      <div id="top3-row" style="display:none">
-        <div class="top3-card"><canvas id="c3-0"></canvas><div class="top3-label" id="l3-0">—</div></div>
-        <div class="top3-card"><canvas id="c3-1"></canvas><div class="top3-label" id="l3-1">—</div></div>
-        <div class="top3-card"><canvas id="c3-2"></canvas><div class="top3-label" id="l3-2">—</div></div>
+      <div id="nest-infobar" style="display:none">
+
+        <!-- Row 1: Count · Cols×Rows · Best Pair -->
+        <div class="info-row info-row-1">
+          <div class="info-left">
+            <div class="stat-item">
+              <span class="stat-label">Count</span>
+              <span class="stat-val" id="si-pcs">—</span>
+            </div>
+            <div class="stat-vline"></div>
+            <div class="stat-item">
+              <span class="stat-label">Cols × Rows</span>
+              <span class="stat-val" id="si-grid">—</span>
+            </div>
+          </div>
+          <div id="nest-best-pair">
+            <div id="best-pair-label">Best Pair</div>
+            <canvas id="c3-0"></canvas>
+          </div>
+        </div>
+
+        <!-- Row 2: Original → Compressed + Suggestions -->
+        <div class="info-row info-row-2">
+          <div class="panel-flow">
+            <div class="panel-size-block">
+              <span class="stat-label">Original</span>
+              <span class="stat-val dim" id="si-orig">—</span>
+            </div>
+            <svg class="flow-arrow" viewBox="0 0 24 10" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M0 5h20M16 1.5l4 3.5-4 3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <div class="panel-size-block">
+              <span class="stat-label">Compressed</span>
+              <span class="stat-val" id="si-panel">—</span>
+            </div>
+          </div>
+          <div class="info-vline"></div>
+          <div class="suggest-inline" id="si-suggest" style="visibility:hidden">
+            <span class="sug-tag">Suggest</span>
+            <span class="sug-entry" id="si-sug-col">—</span>
+            <span class="sug-sep">/</span>
+            <span class="sug-entry" id="si-sug-row">—</span>
+          </div>
+        </div>
+
       </div>
-      <div class="metrics" id="metrics" style="display:none"></div>
-      <div id="suggest-box" style="display:none"></div>
       <div id="nest-canvas-wrap"><canvas id="nest-canvas"></canvas></div>
     </div>
 
@@ -672,10 +755,7 @@ async function runNesting(){
         nestState.compW=d.compressed_w;
         nestState.compH=d.compressed_h;
         nestZoomReset(); nestDrawAll();
-        if(d.top3&&d.top3.length){
-          document.getElementById('top3-row').style.display='flex';
-          d.top3.forEach((t,i)=>drawTop3(i,t));
-        }
+        if(d.top3&&d.top3.length) drawBestPair(d.top3[0]);
         renderMetrics(d.stats);
         renderSuggest(d.stats);
         bridgeState.lines=d.lines;
@@ -701,9 +781,11 @@ const nc=document.getElementById('nest-canvas');
 function nestZoomReset(){
   const cw=nc.clientWidth, ch=nc.clientHeight;
   if(!nestState.compW||!nestState.compH)return;
-  const pad=20;
+  const pad=24;
+  // fit-contain: scale so panel fits inside canvas with equal padding on all sides
   const s=Math.min((cw-pad*2)/nestState.compW,(ch-pad*2)/nestState.compH);
   nestState.scale=s;
+  // center horizontally and vertically (Y-axis flipped: oy is bottom of panel in canvas coords)
   nestState.ox=(cw-nestState.compW*s)/2;
   nestState.oy=(ch+nestState.compH*s)/2;
   nestDrawAll();
@@ -771,46 +853,49 @@ nc.onmousemove=e=>{
 };
 window.addEventListener('resize',()=>{nestDrawAll();bridgeDrawAll();});
 
-// Top3 mini canvas
-function drawTop3(i,t){
-  const c=document.getElementById('c3-'+i);
-  const ctx=c.getContext('2d');
+// Best pair mini canvas (rank #1 only)
+function drawBestPair(t){
+  const c=document.getElementById('c3-0');
   const dpr=window.devicePixelRatio||1;
-  c.width=c.clientWidth*dpr;c.height=c.clientHeight*dpr;
+  c.width=c.clientWidth*dpr; c.height=c.clientHeight*dpr;
+  const ctx=c.getContext('2d');
   ctx.scale(dpr,dpr);
-  const cw=c.clientWidth,ch=c.clientHeight;
-  ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);
+  const cw=c.clientWidth, ch=c.clientHeight;
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,cw,ch);
   const allPts=[...t.p1,...t.p2];
-  const xs=allPts.map(p=>p[0]),ys=allPts.map(p=>p[1]);
-  const minx=Math.min(...xs),miny=Math.min(...ys),maxx=Math.max(...xs),maxy=Math.max(...ys);
-  const s=Math.min((cw-8)/(maxx-minx),(ch-8)/(maxy-miny));
-  const ox=(cw-(maxx-minx)*s)/2;const oy=(ch+(maxy-miny)*s)/2;
-  const tx=x=>ox+(x-minx)*s,ty=y=>oy-(y-miny)*s;
-  const drawPoly=(pts,col)=>{ctx.beginPath();pts.forEach(([x,y],i)=>i===0?ctx.moveTo(tx(x),ty(y)):ctx.lineTo(tx(x),ty(y)));ctx.closePath();ctx.fillStyle=col;ctx.fill();};
-  drawPoly(t.p1,'rgba(220,220,220,.9)');drawPoly(t.p2,'rgba(120,120,120,.9)');
-  document.getElementById('l3-'+i).textContent='#'+(i+1)+'  '+t.pcs+' PCS';
+  const xs=allPts.map(p=>p[0]), ys=allPts.map(p=>p[1]);
+  const minx=Math.min(...xs), miny=Math.min(...ys);
+  const maxx=Math.max(...xs), maxy=Math.max(...ys);
+  const s=Math.min((cw-6)/(maxx-minx),(ch-6)/(maxy-miny));
+  const ox=(cw-(maxx-minx)*s)/2, oy=(ch+(maxy-miny)*s)/2;
+  const tx=x=>ox+(x-minx)*s, ty=y=>oy-(y-miny)*s;
+  const fill=(pts,col)=>{
+    ctx.beginPath();
+    pts.forEach(([x,y],i)=>i===0?ctx.moveTo(tx(x),ty(y)):ctx.lineTo(tx(x),ty(y)));
+    ctx.closePath(); ctx.fillStyle=col; ctx.fill();
+  };
+  fill(t.p1,'rgba(240,240,240,.9)');
+  fill(t.p2,'rgba(100,100,100,.9)');
 }
 
-// Metrics
+// Metrics — 2-row infobar
 function renderMetrics(s){
-  const el=document.getElementById('metrics');
-  el.style.display='grid';
-  el.innerHTML=`
-    <div class="metric"><div class="label">Count</div><div class="val">${s.pcs} <span style="font-size:12px;color:var(--text3)">PCS</span></div></div>
-    <div class="metric"><div class="label">Utilization</div><div class="val">${s.utilization}<span style="font-size:12px;color:var(--text3)">%</span></div></div>
-    <div class="metric"><div class="label">Panel Size</div><div class="val sub">${s.compressed_w} × ${s.compressed_h}</div></div>
-    <div class="metric"><div class="label">Cols × Rows</div><div class="val">${s.cols} × ${s.rows}</div></div>
-  `;
+  document.getElementById('nest-infobar').style.display='flex';
+  // Row 1
+  document.getElementById('si-pcs').innerHTML  = s.pcs+'<span class="stat-unit">pcs</span>';
+  document.getElementById('si-grid').textContent= s.cols+' × '+s.rows;
+  // Row 2 — panel sizes
+  document.getElementById('si-orig').textContent = s.original_w+' × '+s.original_h+' mm';
+  document.getElementById('si-panel').textContent= s.compressed_w+' × '+s.compressed_h+' mm';
 }
 function renderSuggest(s){
-  const el=document.getElementById('suggest-box');
-  if(!s.suggest_w){el.style.display='none';return;}
-  el.style.display='block';
-  el.innerHTML=`<div class="suggest-box">
-    <span class="key">Current</span>  ${s.cur_cols} cols × ${s.cur_rows} rows<br>
-    <span class="key">+1 col</span>  W ≥ ${s.suggest_w} mm  (+${s.extra_w} mm)<br>
-    <span class="key">+1 row</span>  H ≥ ${s.suggest_h} mm  (+${s.extra_h} mm)
-  </div>`;
+  const el=document.getElementById('si-suggest');
+  if(!s.suggest_w){el.style.visibility='hidden';return;}
+  el.style.visibility='visible';
+  document.getElementById('si-sug-col').innerHTML =
+    '<b>+1 col</b>  W ≥ '+s.suggest_w+' mm';
+  document.getElementById('si-sug-row').innerHTML =
+    '<b>+1 row</b>  H ≥ '+s.suggest_h+' mm';
 }
 function renderStatsTable(s){
   document.getElementById('stats-table').style.display='block';
