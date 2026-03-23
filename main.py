@@ -208,113 +208,116 @@ def run_nesting(raw_poly, params, progress_cb=None):
 
 def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
     """
-    Arc-aware interactive segments.
-    Transform = (1) shift DXF entity to block space (-ocx,-ocy)
-                (2) rotate by ang_deg
-                (3) translate so rotated block centroid matches poly.centroid
-    This is correct for both Nesting and Matrix because it derives the
-    translation purely from the placed Shapely polygon, not from stored (ax,ay).
-    Offset uses Shapely buffer on the placed poly (reliable, mode-independent).
+    Builds interactive segments for the bridge canvas.
+
+    Body/hole/offset positions come entirely from the placed Shapely polygons
+    (fps) — guaranteed correct for both Nesting and Matrix modes.
+
+    Additionally, for DXF arc/circle entities, we compute the arc's world
+    position via the transform (shift→rotate→translate to poly.centroid)
+    and emit an extra arc segment so the canvas draws a smooth circle
+    instead of a Shapely-flattened polyline.
+
+    Strategy per entity type:
+      - Arc/Circle  → emit arc segment (smooth canvas rendering)
+      - Line/Other  → emit line segments from Shapely poly coords (accurate)
+    Offset         → always poly.buffer(2, join_style=2) from Shapely (accurate)
     """
     import math as _math
 
     lines = []
 
-    # ── Read raw DXF entities ─────────────────────────────
+    # ── Read DXF to find arc entities (for smooth rendering only) ────
+    dxf_arcs = []  # list of {"cx","cy","r","a0","a1"} in original DXF coords
     try:
         doc = ezdxf.readfile(src_path)
         msp = doc.modelspace()
         entities = msp.query('*[layer=="BOARD_OUTLINE_00"]')
         if not entities:
-            entities = msp.query('LWPOLYLINE POLYLINE CIRCLE ELLIPSE SPLINE ARC LINE')
-    except Exception:
-        entities = []
-
-    raw_segs = []
-    for ent in entities:
-        try:
+            entities = msp.query('CIRCLE ARC')
+        else:
+            # filter to only arc types
+            entities = [e for e in entities if e.dxftype() in ('CIRCLE','ARC')]
+        for ent in entities:
             t = ent.dxftype()
             if t == 'CIRCLE':
                 c = ent.dxf.center
-                raw_segs.append({"kind":"arc","cx":c.x,"cy":c.y,
-                                  "r":ent.dxf.radius,"a0":0.0,"a1":360.0})
+                dxf_arcs.append({"cx":c.x,"cy":c.y,"r":ent.dxf.radius,
+                                  "a0":0.0,"a1":360.0})
             elif t == 'ARC':
                 c = ent.dxf.center
-                raw_segs.append({"kind":"arc","cx":c.x,"cy":c.y,
-                                  "r":ent.dxf.radius,
-                                  "a0":ent.dxf.start_angle,
-                                  "a1":ent.dxf.end_angle})
-            elif t == 'LINE':
-                s, e = ent.dxf.start, ent.dxf.end
-                raw_segs.append({"kind":"line","coords":[[s.x,s.y],[e.x,e.y]]})
-            else:
-                pts = list(make_path(ent).flattening(distance=0.05))
-                if len(pts) < 2: continue
-                for i in range(len(pts)-1):
-                    raw_segs.append({"kind":"line",
-                                      "coords":[[pts[i].x,pts[i].y],
-                                                [pts[i+1].x,pts[i+1].y]]})
-        except: continue
+                dxf_arcs.append({"cx":c.x,"cy":c.y,"r":ent.dxf.radius,
+                                  "a0":ent.dxf.start_angle,"a1":ent.dxf.end_angle})
+    except: pass
 
-    ocx, ocy = cx_cy_orig  # original DXF centroid used when block was built
+    ocx, ocy = cx_cy_orig
 
     for poly, ang_deg, _, _ in fps:
         rad = _math.radians(ang_deg)
         cos_a, sin_a = _math.cos(rad), _math.sin(rad)
-
-        # Step 1: where does the block origin (0,0) land after rotation?
-        # block origin in DXF space = (ocx, ocy); shift to block space = (0,0)
-        # After rotation, block origin stays at (0,0) (it IS the origin)
-        # So the placed centroid of the rotated block = rotation of (0,0) = (0,0)
-        # The actual placed centroid is poly.centroid — so translation = poly.centroid
         pcx, pcy = poly.centroid.x, poly.centroid.y
 
         def world_pt(dxf_x, dxf_y):
-            # shift to block space (centred at origin)
             bx, by = dxf_x - ocx, dxf_y - ocy
-            # rotate
             rx = bx * cos_a - by * sin_a
             ry = bx * sin_a + by * cos_a
-            # translate: add placed centroid
             return rx + pcx, ry + pcy
 
-        # Body / hole arcs
-        for seg in raw_segs:
+        # ── Body: emit arc segments for DXF arcs (smooth rendering) ──
+        # For non-arc entities, body lines come from poly.exterior below
+        placed_arc_ids = set()
+        for arc in dxf_arcs:
+            ncx, ncy = world_pt(arc["cx"], arc["cy"])
+            a0 = (arc["a0"] + ang_deg) % 360
+            a1 = (arc["a1"] + ang_deg) % 360
+            is_hole = poly.contains(Point(ncx, ncy))
+            seg_type = "hole" if is_hole else "body"
             sid = str(uuid.uuid4())
-            if seg["kind"] == "arc":
-                ncx, ncy = world_pt(seg["cx"], seg["cy"])
-                a0 = (seg["a0"] + ang_deg) % 360
-                a1 = (seg["a1"] + ang_deg) % 360
-                is_hole = poly.contains(Point(ncx, ncy))
-                seg_type = "hole" if is_hole else "body"
-                lines.append({"id":sid,"type":seg_type,"kind":"arc",
-                               "cx":round(ncx,4),"cy":round(ncy,4),
-                               "r":round(seg["r"],4),
-                               "a0":round(a0,4),"a1":round(a1,4)})
-            else:
-                x1,y1 = world_pt(seg["coords"][0][0], seg["coords"][0][1])
-                x2,y2 = world_pt(seg["coords"][1][0], seg["coords"][1][1])
-                mid = Point((x1+x2)/2, (y1+y2)/2)
-                is_hole = poly.contains(mid)
-                seg_type = "hole" if is_hole else "body"
-                lines.append({"id":sid,"type":seg_type,"kind":"line",
-                               "coords":[[round(x1,4),round(y1,4)],
-                                         [round(x2,4),round(y2,4)]]})
+            placed_arc_ids.add((round(ncx,2), round(ncy,2), round(arc["r"],2)))
+            lines.append({"id":sid, "type":seg_type, "kind":"arc",
+                           "cx":round(ncx,4), "cy":round(ncy,4),
+                           "r":round(arc["r"],4),
+                           "a0":round(a0,4), "a1":round(a1,4)})
 
-        # Offset: Shapely buffer on placed poly — correct for all modes and rotations
+        # ── Body/Hole lines from Shapely exterior/interiors ──
+        # Skip segments that are already covered by a DXF arc
+        # (rough check: if the midpoint is within 0.1mm of an arc, skip)
+        def near_arc(mx, my):
+            for (acx, acy, ar) in placed_arc_ids:
+                if abs(_math.sqrt((mx-acx)**2+(my-acy)**2) - ar) < 0.2:
+                    return True
+            return False
+
+        ec = list(poly.exterior.coords)
+        for i in range(len(ec)-1):
+            mx2, my2 = (ec[i][0]+ec[i+1][0])/2, (ec[i][1]+ec[i+1][1])/2
+            if not near_arc(mx2, my2):
+                lines.append({"id":str(uuid.uuid4()), "type":"body", "kind":"line",
+                               "coords":[[round(ec[i][0],4),round(ec[i][1],4)],
+                                         [round(ec[i+1][0],4),round(ec[i+1][1],4)]]})
+        for hole in poly.interiors:
+            hc = list(hole.coords)
+            for i in range(len(hc)-1):
+                mx2, my2 = (hc[i][0]+hc[i+1][0])/2, (hc[i][1]+hc[i+1][1])/2
+                if not near_arc(mx2, my2):
+                    lines.append({"id":str(uuid.uuid4()), "type":"hole", "kind":"line",
+                                   "coords":[[round(hc[i][0],4),round(hc[i][1],4)],
+                                             [round(hc[i+1][0],4),round(hc[i+1][1],4)]]})
+
+        # ── Offset: always Shapely buffer — accurate for both modes ──
         try:
             op = poly.buffer(2, join_style=2)
             oc = list(op.exterior.coords)
             for i in range(len(oc)-1):
-                lines.append({"id":str(uuid.uuid4()),"type":"offset","kind":"line",
+                lines.append({"id":str(uuid.uuid4()), "type":"offset", "kind":"line",
                                "coords":[[round(oc[i][0],4),round(oc[i][1],4)],
                                          [round(oc[i+1][0],4),round(oc[i+1][1],4)]]})
             for h in op.interiors:
-                hc = list(h.coords)
-                for i in range(len(hc)-1):
-                    lines.append({"id":str(uuid.uuid4()),"type":"offset","kind":"line",
-                                   "coords":[[round(hc[i][0],4),round(hc[i][1],4)],
-                                             [round(hc[i+1][0],4),round(hc[i+1][1],4)]]})
+                hc2 = list(h.coords)
+                for i in range(len(hc2)-1):
+                    lines.append({"id":str(uuid.uuid4()), "type":"offset", "kind":"line",
+                                   "coords":[[round(hc2[i][0],4),round(hc2[i][1],4)],
+                                             [round(hc2[i+1][0],4),round(hc2[i+1][1],4)]]})
         except: pass
 
     return lines
@@ -600,7 +603,15 @@ async def nest(params: dict):
                     except: pass
             SESSION['interactive_lines'] = lines
 
-            top3_data = []
+            # Add panel frame as 'frame' type segments
+            panel_geo = create_rounded_panel(compw, comph, params.get('corner_r', 4.0))
+            fc = list(panel_geo.exterior.coords)
+            for i in range(len(fc)-1):
+                lines.append({"id":str(uuid.uuid4()),
+                               "coords":[[round(fc[i][0],4),round(fc[i][1],4)],
+                                         [round(fc[i+1][0],4),round(fc[i+1][1],4)]],
+                               "type":"frame","kind":"line"})
+            SESSION['interactive_lines'] = lines
             for c in top3:
                 p1, p2 = c[3][0], c[3][1]
                 top3_data.append({
@@ -675,10 +686,12 @@ async def reset_bridge():
     fps = SESSION.get('final_polys_with_info', [])
     src_path = SESSION.get('_src_dxf_path')
     cx_cy = SESSION.get('_orig_cx_cy', (0.0, 0.0))
+    compw = SESSION.get('compressed_w', 0)
+    comph = SESSION.get('compressed_h', 0)
+    r_corner = SESSION.get('stats', {}).get('corner_r', 4.0)
     if src_path and os.path.exists(src_path) and fps:
         lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy)
     else:
-        # fallback
         lines = []
         for poly, ang, _, _ in fps:
             ec = list(poly.exterior.coords)
@@ -686,6 +699,15 @@ async def reset_bridge():
                 lines.append({"id":str(uuid.uuid4()),
                               "coords":[[ec[i][0],ec[i][1]],[ec[i+1][0],ec[i+1][1]]],
                               "type":"body","kind":"line"})
+    # Add panel frame
+    if compw and comph:
+        panel_geo = create_rounded_panel(compw, comph, r_corner)
+        fc = list(panel_geo.exterior.coords)
+        for i in range(len(fc)-1):
+            lines.append({"id":str(uuid.uuid4()),
+                           "coords":[[round(fc[i][0],4),round(fc[i][1],4)],
+                                     [round(fc[i+1][0],4),round(fc[i+1][1],4)]],
+                           "type":"frame","kind":"line"})
     SESSION['interactive_lines'] = lines
     return {"ok":True, "lines":lines, "connectors":[]}
 
