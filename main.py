@@ -208,9 +208,13 @@ def run_nesting(raw_poly, params, progress_cb=None):
 
 def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
     """
-    Arc-aware interactive segments. Transform derived from poly.centroid
-    so both Nesting and Matrix modes produce correctly placed segments.
-    Offset arcs computed geometrically (concentric arcs ± 2mm).
+    Arc-aware interactive segments.
+    Transform = (1) shift DXF entity to block space (-ocx,-ocy)
+                (2) rotate by ang_deg
+                (3) translate so rotated block centroid matches poly.centroid
+    This is correct for both Nesting and Matrix because it derives the
+    translation purely from the placed Shapely polygon, not from stored (ax,ay).
+    Offset uses Shapely buffer on the placed poly (reliable, mode-independent).
     """
     import math as _math
 
@@ -252,21 +256,29 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
                                                 [pts[i+1].x,pts[i+1].y]]})
         except: continue
 
-    ocx, ocy = cx_cy_orig  # original DXF centroid (block was shifted by -ocx,-ocy)
-    OFFSET_D = 2.0
+    ocx, ocy = cx_cy_orig  # original DXF centroid used when block was built
 
     for poly, ang_deg, _, _ in fps:
         rad = _math.radians(ang_deg)
         cos_a, sin_a = _math.cos(rad), _math.sin(rad)
-        # Use poly.centroid as the placed origin — works for both Nesting and Matrix
+
+        # Step 1: where does the block origin (0,0) land after rotation?
+        # block origin in DXF space = (ocx, ocy); shift to block space = (0,0)
+        # After rotation, block origin stays at (0,0) (it IS the origin)
+        # So the placed centroid of the rotated block = rotation of (0,0) = (0,0)
+        # The actual placed centroid is poly.centroid — so translation = poly.centroid
         pcx, pcy = poly.centroid.x, poly.centroid.y
 
         def world_pt(dxf_x, dxf_y):
-            bx, by = dxf_x - ocx, dxf_y - ocy   # to block space
-            rx = bx * cos_a - by * sin_a          # rotate
+            # shift to block space (centred at origin)
+            bx, by = dxf_x - ocx, dxf_y - ocy
+            # rotate
+            rx = bx * cos_a - by * sin_a
             ry = bx * sin_a + by * cos_a
-            return rx + pcx, ry + pcy             # translate to placed centroid
+            # translate: add placed centroid
+            return rx + pcx, ry + pcy
 
+        # Body / hole arcs
         for seg in raw_segs:
             sid = str(uuid.uuid4())
             if seg["kind"] == "arc":
@@ -275,46 +287,35 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
                 a1 = (seg["a1"] + ang_deg) % 360
                 is_hole = poly.contains(Point(ncx, ncy))
                 seg_type = "hole" if is_hole else "body"
-
-                # body arc
                 lines.append({"id":sid,"type":seg_type,"kind":"arc",
                                "cx":round(ncx,4),"cy":round(ncy,4),
                                "r":round(seg["r"],4),
                                "a0":round(a0,4),"a1":round(a1,4)})
-
-                # offset arc (concentric, ±2mm)
-                off_r = seg["r"] - OFFSET_D if is_hole else seg["r"] + OFFSET_D
-                if off_r > 0:
-                    lines.append({"id":str(uuid.uuid4()),"type":"offset","kind":"arc",
-                                   "cx":round(ncx,4),"cy":round(ncy,4),
-                                   "r":round(off_r,4),
-                                   "a0":round(a0,4),"a1":round(a1,4)})
             else:
                 x1,y1 = world_pt(seg["coords"][0][0], seg["coords"][0][1])
                 x2,y2 = world_pt(seg["coords"][1][0], seg["coords"][1][1])
-                dx, dy = x2-x1, y2-y1
-                length = _math.sqrt(dx*dx+dy*dy)
                 mid = Point((x1+x2)/2, (y1+y2)/2)
                 is_hole = poly.contains(mid)
                 seg_type = "hole" if is_hole else "body"
-
                 lines.append({"id":sid,"type":seg_type,"kind":"line",
                                "coords":[[round(x1,4),round(y1,4)],
                                          [round(x2,4),round(y2,4)]]})
 
-                # offset line: perpendicular shift outward
-                if length > 1e-9:
-                    nx, ny = -dy/length, dx/length
-                    test = Point((x1+x2)/2 + nx*0.1, (y1+y2)/2 + ny*0.1)
-                    if poly.contains(test):
-                        nx, ny = -nx, -ny
-                    ox1 = x1 + nx*OFFSET_D
-                    oy1 = y1 + ny*OFFSET_D
-                    ox2 = x2 + nx*OFFSET_D
-                    oy2 = y2 + ny*OFFSET_D
+        # Offset: Shapely buffer on placed poly — correct for all modes and rotations
+        try:
+            op = poly.buffer(2, join_style=2)
+            oc = list(op.exterior.coords)
+            for i in range(len(oc)-1):
+                lines.append({"id":str(uuid.uuid4()),"type":"offset","kind":"line",
+                               "coords":[[round(oc[i][0],4),round(oc[i][1],4)],
+                                         [round(oc[i+1][0],4),round(oc[i+1][1],4)]]})
+            for h in op.interiors:
+                hc = list(h.coords)
+                for i in range(len(hc)-1):
                     lines.append({"id":str(uuid.uuid4()),"type":"offset","kind":"line",
-                                   "coords":[[round(ox1,4),round(oy1,4)],
-                                             [round(ox2,4),round(oy2,4)]]})
+                                   "coords":[[round(hc[i][0],4),round(hc[i][1],4)],
+                                             [round(hc[i+1][0],4),round(hc[i+1][1],4)]]})
+        except: pass
 
     return lines
 
