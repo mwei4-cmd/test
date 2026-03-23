@@ -256,8 +256,8 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
         for i in range(len(sp)-1):
             for j in range(i+1,len(sp)):
                 g = sp[j].bounds[0 if axis=='x' else 1] - sp[i].bounds[2 if axis=='x' else 3]
-                if g>-0.1: gaps.append(g); break
-        return min(gaps) if gaps else 0.0
+                gaps.append(g); break   # 允許負值（鑲嵌重疊）
+        return round(min(gaps), 4) if gaps else 0.0
 
     xg = get_groups([p.centroid.x for p in fp])
     yg = get_groups([p.centroid.y for p in fp])
@@ -267,7 +267,7 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
         "pcs": len(fp), "p_w": round(p_w,3), "p_h": round(p_h,3),
         "utilization": round(sum(p.area for p in fp)/(compw*comph)*100, 2),
         "cols": len(xg), "rows": len(yg),
-        "gap_x": round(min_gap(fp,'x'),4), "gap_y": round(min_gap(fp,'y'),4),
+        "gap_x": min_gap(fp,'x'), "gap_y": min_gap(fp,'y'),
         "band_l": round(fu2[0],2), "band_r": round(compw-fu2[2],2),
         "band_b": round(fu2[1],2), "band_t": round(comph-fu2[3],2),
         "original_w": round(cw,3), "original_h": round(ch,3),
