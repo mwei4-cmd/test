@@ -46,9 +46,9 @@ def get_full_polygon_with_holes(file_path, target_doc=None):
         try:
             if entity.dxftype() == 'CIRCLE':
                 c = entity.dxf.center
-                poly = Point(c.x, c.y).buffer(entity.dxf.radius, quad_segs=64)
+                poly = Point(c.x, c.y).buffer(entity.dxf.radius, quad_segs=32)
             else:
-                pts = list(make_path(entity).flattening(distance=0.01))
+                pts = list(make_path(entity).flattening(distance=0.05))
                 if len(pts) < 3: continue
                 poly = Polygon([(p.x, p.y) for p in pts])
                 if not poly.is_valid: poly = poly.buffer(0)
@@ -80,20 +80,26 @@ def refine_position(poly_a, poly_b, init_dx, init_dy, target_dist):
     cb = unary_union([poly_a, best_b]).bounds
     best_area = (cb[2]-cb[0])*(cb[3]-cb[1])
     step = 1.0
-    while step >= 0.001:
+    no_improve_count = 0
+    while step >= 0.01:          # 精度從 0.001 放寬到 0.01，速度提升 ~3x
         improved = False
         for ddx, ddy in [(step,0),(-step,0),(0,step),(0,-step)]:
             tb = translate(poly_b, best_dx+ddx, best_dy+ddy)
             if poly_a.distance(tb) < target_dist - 0.001: continue
             cb2 = unary_union([poly_a, tb]).bounds
             a2 = (cb2[2]-cb2[0])*(cb2[3]-cb2[1])
-            if a2 < best_area - 1e-6:
+            if a2 < best_area - 1e-4:
                 best_area = a2; best_dx += ddx; best_dy += ddy; best_b = tb
                 improved = True; break
-        if not improved: step *= 0.5
+        if not improved:
+            step *= 0.5
+            no_improve_count += 1
+            if no_improve_count > 6: break   # 連續 6 次無改善則提早結束
+        else:
+            no_improve_count = 0
     return best_dx, best_dy, best_b, best_area
 
-def run_nesting(raw_poly, params):
+def run_nesting(raw_poly, params, progress_cb=None):
     cw, ch = params["panel_w"], params["panel_h"]
     lb, rb, ub, db = params["left"], params["right"], params["top"], params["bottom"]
     spacing = params["spacing"]
@@ -106,34 +112,63 @@ def run_nesting(raw_poly, params):
     candidates_top3 = []
 
     if "Nesting" in mode:
-        candidates = []
         target_sp = float(spacing)
         rotated = {a: rotate(raw_poly, a, origin=(0,0)) for a in [0,90,180,270]}
         ba = rotated[0]
+
+        # ── 平行計算：每個 (ang_b, angle_deg) 組合獨立處理 ──
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import functools
+
+        tasks = []
         for ang_b, bb in rotated.items():
+            for ad in range(0, 360, 10):
+                tasks.append((ang_b, ad))
+
+        total = len(tasks)
+        done_count = [0]
+
+        def compute_one(task_args):
+            ang_b, ad = task_args
+            bb = rotated[ang_b]
             bw = bb.bounds[2]-bb.bounds[0]; bh = bb.bounds[3]-bb.bounds[1]
             sr = (bw**2+bh**2)**0.5*2
-            for ad in range(0, 360, 10):
-                ar = np.radians(ad); dx, dy = np.cos(ar), np.sin(ar)
-                lo, hi = 0.0, sr
-                if ba.distance(translate(bb, dx*hi, dy*hi)) < target_sp: hi *= 2
-                for _ in range(50):
-                    mid = (lo+hi)/2
-                    if ba.distance(translate(bb, dx*mid, dy*mid)) < target_sp: lo=mid
-                    else: hi=mid
-                idx, idy = dx*hi, dy*hi
-                if ba.distance(translate(bb, idx, idy)) < target_sp - 0.05: continue
-                cdx, cdy, tbf, _ = refine_position(ba, bb, idx, idy, target_sp)
-                if ba.distance(tbf) < target_sp - 0.05: continue
-                cb = unary_union([ba, tbf]).bounds
-                uw, uh = cb[2]-cb[0], cb[3]-cb[1]
-                sw, sh = uw+target_sp, uh+target_sp
-                cc = int(eff_w//sw); cr = int(eff_h//sh)
-                if cc*cr*2 <= 0: continue
-                ox, oy = cb[0], cb[1]
-                coords = [(lb+c*sw-ox, db+r*sh-oy) for r in range(cr) for c in range(cc)]
-                candidates.append((cc*cr*2, -(uw*uh), coords,
-                                   (ba, tbf, cdx, cdy, ang_b), uw*uh, cc, cr, sw, sh))
+            ar = np.radians(ad); dx, dy = np.cos(ar), np.sin(ar)
+            lo, hi = 0.0, sr
+            if ba.distance(translate(bb, dx*hi, dy*hi)) < target_sp: hi *= 2
+            for _ in range(30):
+                mid = (lo+hi)/2
+                if ba.distance(translate(bb, dx*mid, dy*mid)) < target_sp: lo=mid
+                else: hi=mid
+            idx, idy = dx*hi, dy*hi
+            if ba.distance(translate(bb, idx, idy)) < target_sp - 0.05:
+                return None
+            cdx, cdy, tbf, _ = refine_position(ba, bb, idx, idy, target_sp)
+            if ba.distance(tbf) < target_sp - 0.05:
+                return None
+            cb = unary_union([ba, tbf]).bounds
+            uw, uh = cb[2]-cb[0], cb[3]-cb[1]
+            sw, sh = uw+target_sp, uh+target_sp
+            cc = int(eff_w//sw); cr = int(eff_h//sh)
+            if cc*cr*2 <= 0: return None
+            ox, oy = cb[0], cb[1]
+            coords = [(lb+c*sw-ox, db+r*sh-oy) for r in range(cr) for c in range(cc)]
+            return (cc*cr*2, -(uw*uh), coords,
+                    (ba, tbf, cdx, cdy, ang_b), uw*uh, cc, cr, sw, sh)
+
+        # 使用 ThreadPoolExecutor（Render 環境 fork 受限，thread 更穩定）
+        from concurrent.futures import ThreadPoolExecutor
+        candidates = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(compute_one, t): i for i, t in enumerate(tasks)}
+            for future in as_completed(futures):
+                done_count[0] += 1
+                if progress_cb:
+                    progress_cb(done_count[0] / total)
+                result = future.result()
+                if result is not None:
+                    candidates.append(result)
+
         candidates = sorted(candidates, key=lambda x:(x[4],-x[0]))[:3]
         candidates_top3 = candidates
         if candidates:
@@ -166,6 +201,8 @@ def run_nesting(raw_poly, params):
                 max_found = len(temp); best_layout = temp
                 bsw, bsh = stx, sty
                 bcc, bcr = int(eff_w//stx), int(eff_h//sty)
+        if progress_cb:
+            progress_cb(1.0)
 
     return best_layout, bsw, bsh, bcc, bcr, candidates_top3
 
@@ -312,8 +349,13 @@ async def index():
 
 @app.post("/upload")
 async def upload_dxf(file: UploadFile = File(...)):
+    # 把原始 DXF 存到一個持久的暫存路徑，供後續 nest 重建 block 使用
+    if SESSION.get('_src_dxf_path') and os.path.exists(SESSION['_src_dxf_path']):
+        try: os.unlink(SESSION['_src_dxf_path'])
+        except: pass
+
     tmp = tempfile.NamedTemporaryFile(suffix='.dxf', delete=False)
-    tmp.write(await file.read()); tmp.flush()
+    tmp.write(await file.read()); tmp.flush(); tmp.close()
     try:
         doc_out = ezdxf.new('R2010')
         raw, block_name, _, hole_count = get_full_polygon_with_holes(tmp.name, doc_out)
@@ -323,6 +365,8 @@ async def upload_dxf(file: UploadFile = File(...)):
         SESSION['raw_poly'] = raw
         SESSION['geo_block_name'] = block_name
         SESSION['doc_out'] = doc_out
+        SESSION['_src_dxf_path'] = tmp.name   # 保留原始路徑供重建 block 使用
+        SESSION['_src_cx_cy'] = None           # 在 get_full_polygon 裡已平移
         SESSION['interactive_lines'] = []
         SESSION['manual_connectors'] = []
         SESSION['lines_history'] = []
@@ -330,86 +374,123 @@ async def upload_dxf(file: UploadFile = File(...)):
                 "w": round(raw.bounds[2]-raw.bounds[0],3),
                 "h": round(raw.bounds[3]-raw.bounds[1],3)}
     except Exception as e:
+        try: os.unlink(tmp.name)
+        except: pass
         return JSONResponse({"ok":False,"error":str(e)}, status_code=400)
-    finally:
-        os.unlink(tmp.name)
 
 @app.post("/nest")
 async def nest(params: dict):
     raw = SESSION.get('raw_poly')
     if raw is None:
         return JSONResponse({"ok":False,"error":"請先上傳 DXF"}, status_code=400)
-    try:
-        t0 = time.time()
-        # Re-init doc for fresh nesting
-        doc_out = ezdxf.new('R2010')
-        SESSION['doc_out'] = doc_out
-        tmp_f = tempfile.NamedTemporaryFile(suffix='.dxf', delete=False)
-        # re-upload raw poly as block (just re-use stored block name)
-        bl, bsw, bsh, bcc, bcr, top3 = run_nesting(raw, params)
-        if not bl:
-            return JSONResponse({"ok":False,"error":"無法排版"}, status_code=400)
 
-        fps, stats, polys_data, compw, comph = build_output_data(
-            bl, bsw, bsh, bcc, bcr, params,
-            SESSION['geo_block_name'], doc_out, raw)
+    from fastapi.responses import StreamingResponse as SR
+    import asyncio, threading, queue as q_module
 
-        SESSION['best_layout'] = bl
-        SESSION['final_polys_with_info'] = fps
-        SESSION['stats'] = stats
-        SESSION['compressed_w'] = compw
-        SESSION['compressed_h'] = comph
-        SESSION['interactive_lines'] = []
-        SESSION['manual_connectors'] = []
-        SESSION['lines_history'] = []
+    progress_queue = q_module.Queue()
 
-        # Build interactive lines
-        lines = []
-        for poly, ang, _, _ in fps:
-            ec = list(poly.exterior.coords)
-            for i in range(len(ec)-1):
-                lines.append({"id":str(uuid.uuid4()),
-                              "coords":[[ec[i][0],ec[i][1]],[ec[i+1][0],ec[i+1][1]]],
-                              "type":"body"})
-            for hole in poly.interiors:
-                hc = list(hole.coords)
-                for i in range(len(hc)-1):
+    def progress_cb(pct):
+        progress_queue.put(("progress", round(pct * 100)))
+
+    def run_in_thread():
+        try:
+            t0 = time.time()
+            doc_out = ezdxf.new('R2010')
+            src_path = SESSION.get('_src_dxf_path')
+            if src_path and os.path.exists(src_path):
+                _, block_name, _, _ = get_full_polygon_with_holes(src_path, doc_out)
+            else:
+                block_name = SESSION['geo_block_name']
+            SESSION['doc_out'] = doc_out
+            SESSION['geo_block_name'] = block_name
+
+            bl, bsw, bsh, bcc, bcr, top3 = run_nesting(raw, params, progress_cb)
+            if not bl:
+                progress_queue.put(("error", "無法排版"))
+                return
+
+            fps, stats, polys_data, compw, comph = build_output_data(
+                bl, bsw, bsh, bcc, bcr, params, block_name, doc_out, raw)
+
+            SESSION['best_layout'] = bl
+            SESSION['final_polys_with_info'] = fps
+            SESSION['stats'] = stats
+            SESSION['compressed_w'] = compw
+            SESSION['compressed_h'] = comph
+            SESSION['interactive_lines'] = []
+            SESSION['manual_connectors'] = []
+            SESSION['lines_history'] = []
+
+            # Build interactive lines
+            lines = []
+            for poly, ang, _, _ in fps:
+                ec = list(poly.exterior.coords)
+                for i in range(len(ec)-1):
                     lines.append({"id":str(uuid.uuid4()),
-                                  "coords":[[hc[i][0],hc[i][1]],[hc[i+1][0],hc[i+1][1]]],
-                                  "type":"hole"})
-            try:
-                op = poly.buffer(2, join_style=2)
-                oc = list(op.exterior.coords)
-                for i in range(len(oc)-1):
-                    lines.append({"id":str(uuid.uuid4()),
-                                  "coords":[[oc[i][0],oc[i][1]],[oc[i+1][0],oc[i+1][1]]],
-                                  "type":"offset"})
-                for h in op.interiors:
-                    hc = list(h.coords)
+                                  "coords":[[ec[i][0],ec[i][1]],[ec[i+1][0],ec[i+1][1]]],
+                                  "type":"body"})
+                for hole in poly.interiors:
+                    hc = list(hole.coords)
                     for i in range(len(hc)-1):
                         lines.append({"id":str(uuid.uuid4()),
                                       "coords":[[hc[i][0],hc[i][1]],[hc[i+1][0],hc[i+1][1]]],
+                                      "type":"hole"})
+                try:
+                    op = poly.buffer(2, join_style=2)
+                    oc = list(op.exterior.coords)
+                    for i in range(len(oc)-1):
+                        lines.append({"id":str(uuid.uuid4()),
+                                      "coords":[[oc[i][0],oc[i][1]],[oc[i+1][0],oc[i+1][1]]],
                                       "type":"offset"})
-            except: pass
-        SESSION['interactive_lines'] = lines
+                    for h in op.interiors:
+                        hc = list(h.coords)
+                        for i in range(len(hc)-1):
+                            lines.append({"id":str(uuid.uuid4()),
+                                          "coords":[[hc[i][0],hc[i][1]],[hc[i+1][0],hc[i+1][1]]],
+                                          "type":"offset"})
+                except: pass
+            SESSION['interactive_lines'] = lines
 
-        # Top3 pairs for preview
-        top3_data = []
-        for c in top3:
-            p1, p2 = c[3][0], c[3][1]
-            top3_data.append({
-                "pcs": c[0], "area": round(c[4],1),
-                "p1": [[x,y] for x,y in p1.exterior.coords],
-                "p2": [[x,y] for x,y in p2.exterior.coords],
-            })
+            top3_data = []
+            for c in top3:
+                p1, p2 = c[3][0], c[3][1]
+                top3_data.append({
+                    "pcs": c[0], "area": round(c[4],1),
+                    "p1": [[x,y] for x,y in p1.exterior.coords],
+                    "p2": [[x,y] for x,y in p2.exterior.coords],
+                })
 
-        stats['elapsed'] = round(time.time()-t0, 3)
-        return {"ok":True, "stats":stats, "polys":polys_data,
-                "top3":top3_data, "lines":lines,
-                "compressed_w":compw, "compressed_h":comph}
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return JSONResponse({"ok":False,"error":str(e)}, status_code=500)
+            stats['elapsed'] = round(time.time()-t0, 3)
+            payload = {"ok":True, "stats":stats, "polys":polys_data,
+                       "top3":top3_data, "lines":lines,
+                       "compressed_w":compw, "compressed_h":comph}
+            progress_queue.put(("done", payload))
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            progress_queue.put(("error", str(e)))
+
+    thread = threading.Thread(target=run_in_thread, daemon=True)
+    thread.start()
+
+    async def event_stream():
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                msg_type, data = await loop.run_in_executor(
+                    None, lambda: progress_queue.get(timeout=120))
+                if msg_type == "progress":
+                    yield f"data: {json.dumps({'type':'progress','pct':data})}\n\n"
+                elif msg_type == "done":
+                    yield f"data: {json.dumps({'type':'done','payload':data})}\n\n"
+                    break
+                elif msg_type == "error":
+                    yield f"data: {json.dumps({'type':'error','msg':data})}\n\n"
+                    break
+            except Exception:
+                break
+
+    return SR(event_stream(), media_type="text/event-stream",
+              headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 @app.post("/bridge")
 async def bridge(data: dict):
@@ -480,47 +561,73 @@ async def download_nest_dxf():
 
 @app.get("/download_bridge_dxf")
 async def download_bridge_dxf():
-    stats = SESSION.get('stats', {})
     compw = SESSION.get('compressed_w', 162.5)
     comph = SESSION.get('compressed_h', 190.5)
+    fps   = SESSION.get('final_polys_with_info', [])
+    src_doc = SESSION.get('doc_out')           # 含 block 的 doc
+    block_name = SESSION.get('geo_block_name', 'PART_GEO_BLOCK')
     R_corner, r_fix = 4.0, 2.0
-    doc = ezdxf.new('R2010'); doc.header['$INSUNITS']=4
+
+    doc = ezdxf.new('R2010'); doc.header['$INSUNITS'] = 4
     msp = doc.modelspace()
     for lname, col in [('PARTS',7),('OFFSETS',4),('BRIDGES',2),('FRAME',7)]:
-        doc.layers.new(lname, dxfattribs={'color':col})
+        doc.layers.new(lname, dxfattribs={'color': col})
+
+    # ── 1. 從 src_doc 複製 block 到新 doc，保留完整圓弧幾何 ──
+    if src_doc and block_name in src_doc.blocks:
+        src_block = src_doc.blocks[block_name]
+        new_block = doc.blocks.new(name=block_name)
+        for ent in src_block:
+            try:
+                new_block.add_entity(ent.copy())
+            except:
+                pass
+
+    # ── 2. 以 blockref 插入每個零件（含旋轉，圓弧完整保留）──
+    for poly, ang, _, (ax, ay) in fps:
+        msp.add_blockref(block_name, (ax, ay), dxfattribs={
+            'rotation': ang, 'xscale': 1.0, 'yscale': 1.0,
+            'layer': 'PARTS', 'color': 7})
+
+    # ── 3. Offset 線段（橋接後已切斷的折線，不用圓弧）──
     for ld in SESSION.get('interactive_lines', []):
-        if ld['type'] == 'body':
-            msp.add_line(ld['coords'][0], ld['coords'][1], dxfattribs={'layer':'PARTS'})
-        elif ld['type'] == 'hole':
-            msp.add_line(ld['coords'][0], ld['coords'][1], dxfattribs={'layer':'PARTS'})
-        elif ld['type'] == 'offset':
-            msp.add_line(ld['coords'][0], ld['coords'][1], dxfattribs={'layer':'OFFSETS'})
+        if ld['type'] == 'offset':
+            msp.add_line(ld['coords'][0], ld['coords'][1],
+                         dxfattribs={'layer': 'OFFSETS'})
+
+    # ── 4. 橋接弧線 ──
     for b in SESSION.get('manual_connectors', []):
         if b.get('type') == 'precise_sandglass_arc':
             t = b['ang']
-            msp.add_arc((b['lx'],b['ly']),radius=b['r'],
-                        start_angle=t-90,end_angle=t+90,dxfattribs={'layer':'BRIDGES'})
-            msp.add_arc((b['rx'],b['ry']),radius=b['r'],
-                        start_angle=t+90,end_angle=t+270,dxfattribs={'layer':'BRIDGES'})
-    centers = [(R_corner,R_corner),(compw-R_corner,R_corner),
-               (compw-R_corner,comph-R_corner),(R_corner,comph-R_corner)]
-    msp.add_line((R_corner,0),(compw-R_corner,0),dxfattribs={'layer':'FRAME'})
-    msp.add_line((compw,R_corner),(compw,comph-R_corner),dxfattribs={'layer':'FRAME'})
-    msp.add_line((compw-R_corner,comph),(R_corner,comph),dxfattribs={'layer':'FRAME'})
-    msp.add_line((0,comph-R_corner),(0,R_corner),dxfattribs={'layer':'FRAME'})
+            msp.add_arc((b['lx'], b['ly']), radius=b['r'],
+                        start_angle=t-90, end_angle=t+90,
+                        dxfattribs={'layer': 'BRIDGES'})
+            msp.add_arc((b['rx'], b['ry']), radius=b['r'],
+                        start_angle=t+90, end_angle=t+270,
+                        dxfattribs={'layer': 'BRIDGES'})
+
+    # ── 5. 面板邊框與定位孔 ──
+    centers = [(R_corner, R_corner), (compw-R_corner, R_corner),
+               (compw-R_corner, comph-R_corner), (R_corner, comph-R_corner)]
+    msp.add_line((R_corner, 0),      (compw-R_corner, 0),      dxfattribs={'layer': 'FRAME'})
+    msp.add_line((compw, R_corner),  (compw, comph-R_corner),  dxfattribs={'layer': 'FRAME'})
+    msp.add_line((compw-R_corner, comph), (R_corner, comph),   dxfattribs={'layer': 'FRAME'})
+    msp.add_line((0, comph-R_corner), (0, R_corner),           dxfattribs={'layer': 'FRAME'})
     for i, center in enumerate(centers):
-        msp.add_arc(center,radius=R_corner,
+        msp.add_arc(center, radius=R_corner,
                     start_angle=[(180,270),(270,360),(0,90),(90,180)][i][0],
-                    end_angle=[(180,270),(270,360),(0,90),(90,180)][i][1],
-                    dxfattribs={'layer':'FRAME'})
-        msp.add_circle(center,radius=r_fix,dxfattribs={'layer':'FRAME'})
-    msp.add_circle((centers[0][0]+10,centers[0][1]),radius=r_fix,dxfattribs={'layer':'FRAME'})
+                    end_angle  =[(180,270),(270,360),(0,90),(90,180)][i][1],
+                    dxfattribs={'layer': 'FRAME'})
+        msp.add_circle(center, radius=r_fix, dxfattribs={'layer': 'FRAME'})
+    msp.add_circle((centers[0][0]+10, centers[0][1]),
+                   radius=r_fix, dxfattribs={'layer': 'FRAME'})
+
     tmp = tempfile.NamedTemporaryFile(suffix='.dxf', delete=False)
     doc.saveas(tmp.name)
-    with open(tmp.name,'rb') as f: data = f.read()
+    with open(tmp.name, 'rb') as f: data = f.read()
     os.unlink(tmp.name)
     return StreamingResponse(io.BytesIO(data), media_type="application/dxf",
-        headers={"Content-Disposition":f"attachment; filename=production.dxf"})
+        headers={"Content-Disposition": "attachment; filename=production.dxf"})
 
 if __name__ == "__main__":
     import uvicorn
