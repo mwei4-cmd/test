@@ -520,6 +520,7 @@ canvas{display:block;width:100%;height:100%}
       <select id="mode">
         <option value="Nesting (嵌合模式)">Nesting</option>
         <option value="Matrix (矩形模式)">Matrix</option>
+        <option value="V-Cut (零間距)">V-Cut</option>
       </select>
     </div>
 
@@ -550,7 +551,7 @@ canvas{display:block;width:100%;height:100%}
     </div>
 
     <div class="sec-label">Part Spacing</div>
-    <div class="field-single">
+    <div class="field-single" id="spacing-wrap">
       <input type="range" id="spacing" min="0" max="20" step="0.5" value="2"
              oninput="document.getElementById('spacing-val').textContent=this.value+' mm'">
       <div class="range-val" id="spacing-val">2 mm</div>
@@ -693,6 +694,19 @@ function applyPreset(){
   if(v==='160x200'){document.getElementById('pw').value=160;document.getElementById('ph').value=200;}
   else if(v==='200x250'){document.getElementById('pw').value=200;document.getElementById('ph').value=250;}
 }
+
+// Hide spacing for V-Cut
+document.getElementById('mode').addEventListener('change', function(){
+  const isVcut = this.value.includes('V-Cut');
+  document.getElementById('spacing-wrap').style.display = isVcut ? 'none' : 'block';
+  document.querySelector('label[for="spacing"], .sec-label:has(+ #spacing-wrap)');
+  // toggle the section label above spacing
+  const labels = document.querySelectorAll('.sec-label');
+  labels.forEach(l => {
+    if(l.textContent.trim() === 'Part Spacing')
+      l.style.display = isVcut ? 'none' : 'block';
+  });
+});
 
 // ── File upload ──
 let uploadedFile=null;
