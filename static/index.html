@@ -386,6 +386,25 @@ input[type=range]{
 /* remove old suggest-box */
 #suggest-box{display:none !important}
 
+/* ── Adjust col/row buttons ── */
+.adj-btns{display:flex;gap:4px;align-items:center}
+.adj-btn{
+  background:var(--bg3);
+  border:1px solid var(--border2);
+  color:var(--text2);
+  border-radius:3px;
+  padding:1px 7px;
+  font-size:11px;
+  font-family:var(--mono);
+  font-weight:600;
+  cursor:pointer;
+  line-height:1.7;
+  transition:all .15s;
+  white-space:nowrap;
+}
+.adj-btn:hover{border-color:var(--accent);color:var(--accent)}
+.adj-btn:active{background:var(--accent);color:#000;border-color:var(--accent)}
+
 /* ── Canvas (flex:2 so infobar is 1/3, canvas is 2/3) ── */
 #nest-canvas-wrap{
   flex:2;
@@ -579,7 +598,19 @@ canvas{display:block;width:100%;height:100%}
             <div class="stat-vline"></div>
             <div class="stat-block">
               <span class="stat-label">Cols × Rows</span>
-              <span class="stat-val" id="si-grid">—</span>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="stat-val" id="si-grid">—</span>
+                <div class="adj-btns" id="adj-btns" style="display:none">
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <button class="adj-btn" onclick="adjustLayout(1,0)" title="+1 col">+C</button>
+                    <button class="adj-btn" onclick="adjustLayout(-1,0)" title="-1 col">−C</button>
+                  </div>
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <button class="adj-btn" onclick="adjustLayout(0,1)" title="+1 row">+R</button>
+                    <button class="adj-btn" onclick="adjustLayout(0,-1)" title="-1 row">−R</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -917,12 +948,38 @@ function drawBestPair(t){
 // Metrics — 2-col infobar
 function renderMetrics(s){
   document.getElementById('nest-infobar').style.display='flex';
-  // Row 1
   document.getElementById('si-pcs').innerHTML  = s.pcs+'<span class="stat-unit">pcs</span>';
   document.getElementById('si-grid').textContent= s.cols+' × '+s.rows;
-  // Row 2 — panel sizes
+  document.getElementById('adj-btns').style.display='flex';
   document.getElementById('si-orig').textContent = s.original_w+' × '+s.original_h+' mm';
   document.getElementById('si-panel').textContent= s.compressed_w+' × '+s.compressed_h+' mm';
+}
+
+async function adjustLayout(dcol, drow){
+  showLoading(dcol>0?'+1 col':dcol<0?'−1 col':drow>0?'+1 row':'−1 row');
+  const r=await fetch('/adjust',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({dcol,drow})});
+  hideLoading();
+  const d=await r.json();
+  if(!d.ok){alert('Adjust failed: '+d.error);return;}
+
+  // Update panel size inputs to reflect new size
+  document.getElementById('pw').value=d.panel_w;
+  document.getElementById('ph').value=d.panel_h;
+
+  // Re-render exactly like after a full nest
+  nestState.polys=d.polys;
+  nestState.compW=d.compressed_w;
+  nestState.compH=d.compressed_h;
+  nestZoomReset(); nestDrawAll();
+  renderMetrics(d.stats);
+  renderSuggest(d.stats);
+  bridgeState.lines=d.lines;
+  bridgeState.connectors=[];
+  bridgeState.compW=d.compressed_w;
+  bridgeState.compH=d.compressed_h;
+  renderStatsTable(d.stats);
 }
 function renderSuggest(s){
   const el=document.getElementById('si-suggest');
