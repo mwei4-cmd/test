@@ -375,14 +375,40 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
             else: g.append([c])
         return g
     def min_gap(polys, axis):
-        if len(polys)<2: return 0.0
-        gaps=[]
-        sp = sorted(polys, key=lambda p: p.bounds[0 if axis=='x' else 1])
-        for i in range(len(sp)-1):
-            for j in range(i+1,len(sp)):
-                g = sp[j].bounds[0 if axis=='x' else 1] - sp[i].bounds[2 if axis=='x' else 3]
-                gaps.append(g); break   # 允許負值（鑲嵌重疊）
-        return round(min(gaps), 4) if gaps else 0.0
+        """
+        Find the minimum bounding-box gap between any pair of polys
+        along the given axis.
+        - axis='x': gap = neighbour.minx - current.maxx
+          (only count pairs where the neighbour is actually to the RIGHT,
+           i.e. their X ranges don't overlap in the perpendicular direction
+           OR we just want the raw bbox gap regardless)
+        - Positive = space between, 0 = touching, negative = bbox overlap (nesting)
+        """
+        if len(polys) < 2: return 0.0
+        min_g = float('inf')
+        if axis == 'x':
+            # Sort by minx
+            sp = sorted(polys, key=lambda p: p.bounds[0])
+            for i in range(len(sp)):
+                for j in range(i+1, len(sp)):
+                    # gap = j.minx - i.maxx
+                    g = sp[j].bounds[0] - sp[i].bounds[2]
+                    if g < min_g:
+                        min_g = g
+                    # Once g is positive and larger than current min, further j's
+                    # will only be larger — break inner loop
+                    if g > min_g + 50:
+                        break
+        else:
+            sp = sorted(polys, key=lambda p: p.bounds[1])
+            for i in range(len(sp)):
+                for j in range(i+1, len(sp)):
+                    g = sp[j].bounds[1] - sp[i].bounds[3]
+                    if g < min_g:
+                        min_g = g
+                    if g > min_g + 50:
+                        break
+        return round(min_g, 4) if min_g != float('inf') else 0.0
 
     xg = get_groups([p.centroid.x for p in fp])
     yg = get_groups([p.centroid.y for p in fp])
