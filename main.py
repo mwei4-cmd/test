@@ -620,6 +620,11 @@ async def nest(params: dict):
                 bl, bsw, bsh, bcc, bcr, params, block_name, doc_out, raw)
 
             SESSION['best_layout'] = bl
+            SESSION['best_step_w'] = bsw
+            SESSION['best_step_h'] = bsh
+            SESSION['best_count_col'] = bcc
+            SESSION['best_count_row'] = bcr
+            SESSION['last_params'] = dict(params)
             SESSION['final_polys_with_info'] = fps
             SESSION['stats'] = stats
             SESSION['compressed_w'] = compw
@@ -767,6 +772,120 @@ async def reset_bridge():
                            "type":"frame","kind":"line"})
     SESSION['interactive_lines'] = lines
     return {"ok":True, "lines":lines, "connectors":[]}
+
+@app.post("/adjust")
+async def adjust(data: dict):
+    """
+    Add/remove one column or row without re-running the full nesting algorithm.
+    data: {"dcol": +1/-1, "drow": 0} or {"dcol": 0, "drow": +1/-1}
+    Recomputes layout by shifting best_count_col/row and rebuilding output.
+    """
+    bl      = SESSION.get('best_layout')
+    bsw     = SESSION.get('best_step_w', 0)
+    bsh     = SESSION.get('best_step_h', 0)
+    bcc     = SESSION.get('best_count_col', 0)
+    bcr     = SESSION.get('best_count_row', 0)
+    params  = SESSION.get('last_params')
+    raw     = SESSION.get('raw_poly')
+    block_name = SESSION.get('geo_block_name')
+    doc_out_old = SESSION.get('doc_out')
+
+    if not bl or not params or not raw or bsw == 0:
+        return JSONResponse({"ok":False,"error":"No layout available"}, status_code=400)
+
+    dcol = int(data.get('dcol', 0))
+    drow = int(data.get('drow', 0))
+
+    new_col = max(1, bcc + dcol)
+    new_row = max(1, bcr + drow)
+
+    # Update panel size to fit the new col/row count
+    # new panel eff = n * step (with small tolerance)
+    lb = params['left']; rb = params['right']
+    ub = params['top'];  db = params['bottom']
+
+    new_eff_w = new_col * bsw
+    new_eff_h = new_row * bsh
+    new_panel_w = new_eff_w + lb + rb
+    new_panel_h = new_eff_h + ub + db
+
+    # Build new layout from scratch using the stored nesting result
+    # Re-run run_nesting with the updated panel size
+    new_params = dict(params)
+    new_params['panel_w'] = round(new_panel_w, 4)
+    new_params['panel_h'] = round(new_panel_h, 4)
+
+    try:
+        # Rebuild doc with block
+        doc_out = ezdxf.new('R2010')
+        src_path = SESSION.get('_src_dxf_path')
+        if src_path and os.path.exists(src_path):
+            _, bn, _, _ = get_full_polygon_with_holes(src_path, doc_out)
+        else:
+            bn = block_name
+            # copy block from old doc
+            if doc_out_old and block_name in doc_out_old.blocks:
+                nb = doc_out.blocks.new(name=block_name)
+                for ent in doc_out_old.blocks[block_name]:
+                    try: nb.add_entity(ent.copy())
+                    except: pass
+                bn = block_name
+
+        # Re-run nesting with new panel size (fast — same algorithm)
+        new_bl, new_bsw, new_bsh, new_bcc, new_bcr, _ = run_nesting(raw, new_params)
+        if not new_bl:
+            return JSONResponse({"ok":False,"error":"Cannot fit parts"}, status_code=400)
+
+        fps, stats, polys_data, compw, comph = build_output_data(
+            new_bl, new_bsw, new_bsh, new_bcc, new_bcr,
+            new_params, bn, doc_out, raw)
+
+        SESSION['best_layout']    = new_bl
+        SESSION['best_step_w']    = new_bsw
+        SESSION['best_step_h']    = new_bsh
+        SESSION['best_count_col'] = new_bcc
+        SESSION['best_count_row'] = new_bcr
+        SESSION['last_params']    = new_params
+        SESSION['doc_out']        = doc_out
+        SESSION['geo_block_name'] = bn
+        SESSION['final_polys_with_info'] = fps
+        SESSION['stats']          = stats
+        SESSION['compressed_w']   = compw
+        SESSION['compressed_h']   = comph
+        SESSION['interactive_lines']  = []
+        SESSION['manual_connectors']  = []
+        SESSION['lines_history']      = []
+
+        # Rebuild interactive lines
+        cx_cy = SESSION.get('_orig_cx_cy', (0.0, 0.0))
+        if src_path and os.path.exists(src_path):
+            lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy)
+        else:
+            lines = []
+            for poly, ang, _, _ in fps:
+                ec = list(poly.exterior.coords)
+                for i in range(len(ec)-1):
+                    lines.append({"id":str(uuid.uuid4()),
+                                  "coords":[[ec[i][0],ec[i][1]],[ec[i+1][0],ec[i+1][1]]],
+                                  "type":"body","kind":"line"})
+
+        # Add panel frame
+        panel_geo = create_rounded_panel(compw, comph, new_params.get('corner_r', 4.0))
+        fc = list(panel_geo.exterior.coords)
+        for i in range(len(fc)-1):
+            lines.append({"id":str(uuid.uuid4()),
+                           "coords":[[round(fc[i][0],4),round(fc[i][1],4)],
+                                     [round(fc[i+1][0],4),round(fc[i+1][1],4)]],
+                           "type":"frame","kind":"line"})
+        SESSION['interactive_lines'] = lines
+
+        stats['elapsed'] = 0
+        return {"ok":True, "stats":stats, "polys":polys_data,
+                "lines":lines, "compressed_w":compw, "compressed_h":comph,
+                "panel_w": round(new_panel_w,3), "panel_h": round(new_panel_h,3)}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return JSONResponse({"ok":False,"error":str(e)}, status_code=500)
 
 @app.get("/download_nest_dxf")
 async def download_nest_dxf():
