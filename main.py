@@ -180,7 +180,29 @@ def run_nesting(raw_poly, params, progress_cb=None):
                 fb = translate(tbf, tx, ty)
                 best_layout.append((fa, 0, False, (tx, ty)))
                 best_layout.append((fb, abf, False, (tx+dxf, ty+dyf)))
-    else:
+    elif "V-Cut" in mode:
+        max_found = 0
+        for ang in [0, 90, 180, 270]:
+            tb = rotate(raw_poly, ang, origin=(0,0))
+            sx, sy, ex, ey = tb.bounds
+            sw, sh = ex-sx, ey-sy
+            stx, sty = sw, sh  # zero spacing — exact bbox step
+            temp = []
+            cy2 = db
+            while cy2 + sh <= ch - ub + 0.001:
+                cx2 = lb
+                while cx2 + sw <= cw - rb + 0.001:
+                    tp = translate(tb, cx2-sx, cy2-sy)
+                    temp.append((tp, ang, False, (tp.centroid.x, tp.centroid.y)))
+                    cx2 += stx
+                cy2 += sty
+            if len(temp) > max_found:
+                max_found = len(temp); best_layout = temp
+                bsw, bsh = stx, sty
+                bcc, bcr = int(eff_w // stx), int(eff_h // sty)
+        if progress_cb:
+            progress_cb(1.0)
+    else:  # Matrix
         max_found = 0
         for ang in [0,90,180,270]:
             tb = rotate(raw_poly, ang, origin=(0,0))
