@@ -776,75 +776,122 @@ async def reset_bridge():
 @app.post("/adjust")
 async def adjust(data: dict):
     """
-    Add/remove one column or row without re-running the full nesting algorithm.
-    data: {"dcol": +1/-1, "drow": 0} or {"dcol": 0, "drow": +1/-1}
-    Recomputes layout by shifting best_count_col/row and rebuilding output.
+    Add/remove one column or row by directly extending/trimming the layout.
+    No re-running of the nesting algorithm — uses stored step/count directly.
     """
-    bl      = SESSION.get('best_layout')
+    mode    = SESSION.get('last_params', {}).get('mode', '')
     bsw     = SESSION.get('best_step_w', 0)
     bsh     = SESSION.get('best_step_h', 0)
     bcc     = SESSION.get('best_count_col', 0)
     bcr     = SESSION.get('best_count_row', 0)
     params  = SESSION.get('last_params')
     raw     = SESSION.get('raw_poly')
-    block_name = SESSION.get('geo_block_name')
+    block_name  = SESSION.get('geo_block_name')
     doc_out_old = SESSION.get('doc_out')
+    src_path    = SESSION.get('_src_dxf_path')
 
-    if not bl or not params or not raw or bsw == 0:
+    if not params or not raw or bsw == 0 or bsh == 0:
         return JSONResponse({"ok":False,"error":"No layout available"}, status_code=400)
 
     dcol = int(data.get('dcol', 0))
     drow = int(data.get('drow', 0))
-
     new_col = max(1, bcc + dcol)
     new_row = max(1, bcr + drow)
 
-    # Update panel size to fit the new col/row count
-    # new panel eff = n * step (with small tolerance)
     lb = params['left']; rb = params['right']
     ub = params['top'];  db = params['bottom']
-
-    new_eff_w = new_col * bsw
-    new_eff_h = new_row * bsh
-    new_panel_w = new_eff_w + lb + rb
-    new_panel_h = new_eff_h + ub + db
-
-    # Build new layout from scratch using the stored nesting result
-    # Re-run run_nesting with the updated panel size
-    new_params = dict(params)
-    new_params['panel_w'] = round(new_panel_w, 4)
-    new_params['panel_h'] = round(new_panel_h, 4)
+    spacing = params.get('spacing', 2)
 
     try:
-        # Rebuild doc with block
+        # ── Rebuild doc with block ──────────────────────────
         doc_out = ezdxf.new('R2010')
-        src_path = SESSION.get('_src_dxf_path')
         if src_path and os.path.exists(src_path):
             _, bn, _, _ = get_full_polygon_with_holes(src_path, doc_out)
         else:
             bn = block_name
-            # copy block from old doc
             if doc_out_old and block_name in doc_out_old.blocks:
                 nb = doc_out.blocks.new(name=block_name)
                 for ent in doc_out_old.blocks[block_name]:
                     try: nb.add_entity(ent.copy())
                     except: pass
-                bn = block_name
 
-        # Re-run nesting with new panel size (fast — same algorithm)
-        new_bl, new_bsw, new_bsh, new_bcc, new_bcr, _ = run_nesting(raw, new_params)
+        # ── Reconstruct layout for new col/row count ────────
+        # Strategy: rebuild from raw_poly using the SAME step and pairing
+        # stored from the original nesting run.
+        #
+        # For Nesting: we stored the full best_layout list which has
+        # (poly, ang, is_bf, (tx, ty)) for every placed piece.
+        # The layout is arranged in a grid: each "cell" at (col, row) has
+        # two pieces (A at offset (0,0) and B at offset (dx_final, dy_final)).
+        # We reconstruct by re-placing pieces using the step.
+        #
+        # For Matrix / V-Cut: each cell has one piece.
+        # We use the first piece from best_layout to get the rotation and
+        # bounding-box placement anchor, then regenerate the grid.
+
+        if "Nesting" in mode and SESSION.get('best_layout'):
+            orig_bl = SESSION['best_layout']
+            # Each pair occupies two consecutive entries: (A, B) for each cell
+            # Extract the first pair to get ang_b, dx_final, dy_final
+            if len(orig_bl) >= 2:
+                p_a, ang_a, _, (tx_a0, ty_a0) = orig_bl[0]
+                p_b, ang_b, _, (tx_b0, ty_b0) = orig_bl[1]
+                dx_final = tx_b0 - tx_a0
+                dy_final = ty_b0 - ty_a0
+
+                # The "offset_x/y" is the bbox origin of the pair unit
+                from shapely.affinity import rotate as shp_rotate
+                ba_ref = shp_rotate(raw, ang_a, origin=(0,0))
+                bb_ref = shp_rotate(raw, ang_b, origin=(0,0))
+                tb_placed = translate(bb_ref, dx_final, dy_final)
+                cb = unary_union([ba_ref, tb_placed]).bounds
+                offset_x, offset_y = cb[0], cb[1]
+
+                new_bl = []
+                for r in range(new_row):
+                    for c in range(new_col):
+                        tx = lb + c * bsw - offset_x
+                        ty = db + r * bsh - offset_y
+                        fa = translate(ba_ref, tx, ty)
+                        fb = translate(tb_placed, tx, ty)
+                        new_bl.append((fa, ang_a, False, (tx, ty)))
+                        new_bl.append((fb, ang_b, False,
+                                       (tx + dx_final, ty + dy_final)))
+            else:
+                new_bl = orig_bl
+        else:
+            # Matrix / V-Cut: regenerate grid from raw_poly
+            orig_bl = SESSION.get('best_layout', [])
+            if orig_bl:
+                _, ang, _, _ = orig_bl[0]
+            else:
+                ang = 0
+            tb = rotate(raw, ang, origin=(0,0))
+            sx, sy, ex, ey = tb.bounds
+            new_bl = []
+            for r in range(new_row):
+                for c in range(new_col):
+                    cx2 = lb + c * bsw
+                    cy2 = db + r * bsh
+                    tp = translate(tb, cx2-sx, cy2-sy)
+                    new_bl.append((tp, ang, False, (tp.centroid.x, tp.centroid.y)))
+
         if not new_bl:
-            return JSONResponse({"ok":False,"error":"Cannot fit parts"}, status_code=400)
+            return JSONResponse({"ok":False,"error":"Cannot build layout"}, status_code=400)
+
+        # ── Build output with new layout ────────────────────
+        new_params = dict(params)
+        # Panel size = exact fit for new_col/new_row
+        new_params['panel_w'] = round(new_col * bsw + lb + rb, 4)
+        new_params['panel_h'] = round(new_row * bsh + ub + db, 4)
 
         fps, stats, polys_data, compw, comph = build_output_data(
-            new_bl, new_bsw, new_bsh, new_bcc, new_bcr,
+            new_bl, bsw, bsh, new_col, new_row,
             new_params, bn, doc_out, raw)
 
         SESSION['best_layout']    = new_bl
-        SESSION['best_step_w']    = new_bsw
-        SESSION['best_step_h']    = new_bsh
-        SESSION['best_count_col'] = new_bcc
-        SESSION['best_count_row'] = new_bcr
+        SESSION['best_count_col'] = new_col
+        SESSION['best_count_row'] = new_row
         SESSION['last_params']    = new_params
         SESSION['doc_out']        = doc_out
         SESSION['geo_block_name'] = bn
@@ -862,14 +909,7 @@ async def adjust(data: dict):
             lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy)
         else:
             lines = []
-            for poly, ang, _, _ in fps:
-                ec = list(poly.exterior.coords)
-                for i in range(len(ec)-1):
-                    lines.append({"id":str(uuid.uuid4()),
-                                  "coords":[[ec[i][0],ec[i][1]],[ec[i+1][0],ec[i+1][1]]],
-                                  "type":"body","kind":"line"})
 
-        # Add panel frame
         panel_geo = create_rounded_panel(compw, comph, new_params.get('corner_r', 4.0))
         fc = list(panel_geo.exterior.coords)
         for i in range(len(fc)-1):
@@ -882,7 +922,8 @@ async def adjust(data: dict):
         stats['elapsed'] = 0
         return {"ok":True, "stats":stats, "polys":polys_data,
                 "lines":lines, "compressed_w":compw, "compressed_h":comph,
-                "panel_w": round(new_panel_w,3), "panel_h": round(new_panel_h,3)}
+                "panel_w": new_params['panel_w'], "panel_h": new_params['panel_h']}
+
     except Exception as e:
         import traceback; traceback.print_exc()
         return JSONResponse({"ok":False,"error":str(e)}, status_code=500)
