@@ -2,9 +2,8 @@ import io, math, time, tempfile, os, uuid, json
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.sessions import SessionMiddleware
 import numpy as np
 
 import ezdxf
@@ -18,97 +17,46 @@ try:
 except ImportError:
     JS_ROUND = 1
 
-
-from google_auth_oauthlib.flow import Flow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "")
-SHEET_TAB = "Input"  # 分頁名稱（工作表標籤）
+# ── Google Sheet 設定 ──────────────────────────────────────────────────────────
+SCOPES   = ["https://www.googleapis.com/auth/spreadsheets"]
+SHEET_ID  = os.environ.get("GOOGLE_SHEET_ID", "")
+SHEET_TAB = "Input"   # ← 改成你的分頁名稱
 
+def _get_service():
+    """Service Account 直接建立 Sheets service，不需要使用者登入"""
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if not sa_json:
+        return None
+    try:
+        info  = json.loads(sa_json)
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=SCOPES)
+        return build("sheets", "v4", credentials=creds, cache_discovery=False)
+    except Exception as e:
+        print(f"[Sheet] Service Account error: {e}")
+        return None
+
+# ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI()
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=os.environ.get("APP_SECRET_KEY", "dev-secret-key"),
-    https_only=True,   # Render 是 HTTPS，保持 True
-    same_site="lax",
-)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ─── OAuth helpers ───────────────────────────────────────────────────────────
-
-def _make_flow(request: Request) -> Flow:
-    return Flow.from_client_config(
-        {
-            "web": {
-                "client_id":     os.environ["GOOGLE_CLIENT_ID"],
-                "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
-                "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
-                "token_uri":     "https://oauth2.googleapis.com/token",
-            }
-        },
-        scopes=SCOPES,
-        redirect_uri=str(request.base_url).rstrip("/") + "/oauth2callback",
-    )
-
-def _get_service(request: Request):
-    """Session에서 token을 꺼내 Sheets service 반환. 없으면 None."""
-    tok = request.session.get("gtoken")
-    if not tok:
-        return None
-    creds = Credentials(
-        token=tok["token"],
-        refresh_token=tok.get("refresh_token"),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["GOOGLE_CLIENT_ID"],
-        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
-        scopes=SCOPES,
-    )
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
-
-# ─── OAuth routes ─────────────────────────────────────────────────────────────
-
-@app.get("/auth/login")
-async def auth_login(request: Request):
-    flow = _make_flow(request)
-    auth_url, state = flow.authorization_url(
-        access_type="offline",
-        prompt="consent",
-        include_granted_scopes="true",
-    )
-    request.session["oauth_state"] = state
-    return RedirectResponse(auth_url)
-
-@app.get("/oauth2callback")
-async def oauth2callback(request: Request):
-    flow = _make_flow(request)
-    flow.fetch_token(authorization_response=str(request.url))
-    creds = flow.credentials
-    request.session["gtoken"] = {
-        "token":         creds.token,
-        "refresh_token": creds.refresh_token,
-    }
-    return RedirectResponse("/")
-
+# ── Auth status（Service Account 不需要登入，永遠回傳 True）────────────────────
 @app.get("/auth/status")
-async def auth_status(request: Request):
-    return {"logged_in": bool(request.session.get("gtoken"))}
+async def auth_status():
+    svc = _get_service()
+    return {"logged_in": svc is not None}
 
-@app.get("/auth/logout")
-async def auth_logout(request: Request):
-    request.session.pop("gtoken", None)
-    return {"ok": True}
-
-# ─── Sheet routes ─────────────────────────────────────────────────────────────
-
+# ── 讀取 C14:C20 的 Data Validation 選項 ──────────────────────────────────────
 @app.get("/sheet/dropdown_options")
-async def sheet_dropdown_options(request: Request):
-    svc = _get_service(request)
+async def sheet_dropdown_options():
+    svc = _get_service()
     if not svc:
-        return JSONResponse({"error": "not_logged_in"}, status_code=401)
+        return JSONResponse({"error": "Service Account 未設定"}, status_code=401)
     try:
         result = svc.spreadsheets().get(
             spreadsheetId=SHEET_ID,
@@ -124,7 +72,6 @@ async def sheet_dropdown_options(request: Request):
             vals = [v["userEnteredValue"] for v in dv.get("condition", {}).get("values", [])]
             options_per_row.append(vals)
 
-        # 補齊到 7 列（避免 Sheet 空白列造成 index 錯誤）
         while len(options_per_row) < 7:
             options_per_row.append([])
 
@@ -132,12 +79,12 @@ async def sheet_dropdown_options(request: Request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-
+# ── 寫入 Sheet + 讀回計算結果 ─────────────────────────────────────────────────
 @app.post("/sheet/calculate")
 async def sheet_calculate(request: Request):
-    svc = _get_service(request)
+    svc = _get_service()
     if not svc:
-        return JSONResponse({"error": "not_logged_in"}, status_code=401)
+        return JSONResponse({"error": "Service Account 未設定"}, status_code=401)
 
     body = await request.json()
 
@@ -168,7 +115,7 @@ async def sheet_calculate(request: Request):
             body={"valueInputOption": "USER_ENTERED", "data": write_data},
         ).execute()
 
-        time.sleep(1.5)  # 等 Sheet 重算
+        time.sleep(1.5)
 
         result = sheets.values().batchGet(
             spreadsheetId=SHEET_ID,
@@ -183,8 +130,8 @@ async def sheet_calculate(request: Request):
 
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-        
-# ── In-memory session store (single-user; extend with session IDs for multi-user) ──
+
+# ── In-memory session ──────────────────────────────────────────────────────────
 SESSION = {
     "raw_poly": None, "geo_block_name": None, "doc_out": None,
     "best_layout": [], "best_step_w": 0, "best_step_h": 0,
@@ -194,9 +141,7 @@ SESSION = {
     "lines_history": [],
 }
 
-# ─────────────────────────────────────────────
-# Geometry helpers
-# ─────────────────────────────────────────────
+# ── Geometry helpers ───────────────────────────────────────────────────────────
 def get_full_polygon_with_holes(file_path, target_doc=None):
     doc = ezdxf.readfile(file_path)
     msp = doc.modelspace()
@@ -243,7 +188,7 @@ def refine_position(poly_a, poly_b, init_dx, init_dy, target_dist):
     best_area = (cb[2]-cb[0])*(cb[3]-cb[1])
     step = 1.0
     no_improve_count = 0
-    while step >= 0.01:          # 精度從 0.001 放寬到 0.01，速度提升 ~3x
+    while step >= 0.01:
         improved = False
         for ddx, ddy in [(step,0),(-step,0),(0,step),(0,-step)]:
             tb = translate(poly_b, best_dx+ddx, best_dy+ddy)
@@ -256,7 +201,7 @@ def refine_position(poly_a, poly_b, init_dx, init_dy, target_dist):
         if not improved:
             step *= 0.5
             no_improve_count += 1
-            if no_improve_count > 6: break   # 連續 6 次無改善則提早結束
+            if no_improve_count > 6: break
         else:
             no_improve_count = 0
     return best_dx, best_dy, best_b, best_area
@@ -278,9 +223,7 @@ def run_nesting(raw_poly, params, progress_cb=None):
         rotated = {a: rotate(raw_poly, a, origin=(0,0)) for a in [0,90,180,270]}
         ba = rotated[0]
 
-        # ── 平行計算：每個 (ang_b, angle_deg) 組合獨立處理 ──
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        import functools
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         tasks = []
         for ang_b, bb in rotated.items():
@@ -318,8 +261,6 @@ def run_nesting(raw_poly, params, progress_cb=None):
             return (cc*cr*2, -(uw*uh), coords,
                     (ba, tbf, cdx, cdy, ang_b), uw*uh, cc, cr, sw, sh)
 
-        # 使用 ThreadPoolExecutor（Render 環境 fork 受限，thread 更穩定）
-        from concurrent.futures import ThreadPoolExecutor
         candidates = []
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(compute_one, t): i for i, t in enumerate(tasks)}
@@ -348,7 +289,7 @@ def run_nesting(raw_poly, params, progress_cb=None):
             tb = rotate(raw_poly, ang, origin=(0,0))
             sx, sy, ex, ey = tb.bounds
             sw, sh = ex-sx, ey-sy
-            stx, sty = sw, sh  # zero spacing — exact bbox step
+            stx, sty = sw, sh
             temp = []
             cy2 = db
             while cy2 + sh <= ch - ub + 0.001:
@@ -391,20 +332,11 @@ def run_nesting(raw_poly, params, progress_cb=None):
     return best_layout, bsw, bsh, bcc, bcr, candidates_top3
 
 def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
-    """
-    Builds interactive segments for the bridge canvas.
-    - Body/hole arcs: from DXF CIRCLE/ARC, positioned via transform
-    - Body/hole lines: from Shapely poly.exterior / poly.interiors
-      but ONLY for non-arc DXF entities (no duplication)
-    - Offset: poly.buffer(2) exterior ONLY (no interiors = no hole offset)
-    """
     import math as _math
 
     lines = []
-
-    # ── Read DXF entities ──────────────────────────────────
-    dxf_arcs = []     # CIRCLE / ARC entities → rendered as smooth arcs
-    has_non_arc = False  # whether there are LINE/LWPOLYLINE etc.
+    dxf_arcs = []
+    has_non_arc = False
     try:
         doc = ezdxf.readfile(src_path)
         msp = doc.modelspace()
@@ -438,8 +370,7 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
             ry = bx * sin_a + by * cos_a
             return rx + pcx, ry + pcy
 
-        # Build list of exterior arc world-coords for quick lookup
-        exterior_arcs = []  # arcs confirmed as exterior (body)
+        exterior_arcs = []
         for arc in dxf_arcs:
             ncx, ncy = world_pt(arc["cx"], arc["cy"])
             a0 = (arc["a0"] + ang_deg) % 360
@@ -449,41 +380,32 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
                 "r":round(arc["r"],4), "a0":round(a0,4), "a1":round(a1,4)
             })
 
-        # ── Interior holes: match each ring to a DXF arc if possible ──
-        # A DXF CIRCLE that is a hole has its centre at the ring's centroid
-        matched_exterior = set()  # indices into exterior_arcs that are confirmed body
+        matched_exterior = set()
 
         for hole in poly.interiors:
             ring_poly = Polygon(hole)
             rcx, rcy = ring_poly.centroid.x, ring_poly.centroid.y
-            # Estimate hole radius from area: r ≈ sqrt(area/π)
             import math as _m2
             r_est = _m2.sqrt(ring_poly.area / _m2.pi)
-
-            # Find DXF arc whose world centre is close to this ring's centroid
-            best_idx, best_dist = -1, 1.0  # tolerance 1mm
+            best_idx, best_dist = -1, 1.0
             for idx, ea in enumerate(exterior_arcs):
                 d = _m2.sqrt((ea["ncx"]-rcx)**2 + (ea["ncy"]-rcy)**2)
                 if d < best_dist and abs(ea["r"] - r_est) < r_est * 0.1 + 0.5:
                     best_dist = d
                     best_idx = idx
-
             if best_idx >= 0:
-                # Match found → emit as smooth arc, mark as NOT exterior
                 ea = exterior_arcs[best_idx]
                 matched_exterior.add(best_idx)
                 lines.append({"id":str(uuid.uuid4()), "type":"hole", "kind":"arc",
                                "cx":ea["ncx"], "cy":ea["ncy"],
                                "r":ea["r"], "a0":ea["a0"], "a1":ea["a1"]})
             else:
-                # No DXF arc match → fall back to Shapely polyline
                 hc = list(hole.coords)
                 for i in range(len(hc)-1):
                     lines.append({"id":str(uuid.uuid4()), "type":"hole", "kind":"line",
                                    "coords":[[round(hc[i][0],4),round(hc[i][1],4)],
                                              [round(hc[i+1][0],4),round(hc[i+1][1],4)]]})
 
-        # ── Exterior body arcs: only those NOT matched as holes ──
         for idx, ea in enumerate(exterior_arcs):
             if idx in matched_exterior:
                 continue
@@ -491,7 +413,6 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
                            "cx":ea["ncx"], "cy":ea["ncy"],
                            "r":ea["r"], "a0":ea["a0"], "a1":ea["a1"]})
 
-        # ── Body lines from Shapely exterior (when non-arc entities exist) ──
         if has_non_arc:
             ec = list(poly.exterior.coords)
             for i in range(len(ec)-1):
@@ -499,7 +420,6 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
                                "coords":[[round(ec[i][0],4),round(ec[i][1],4)],
                                          [round(ec[i+1][0],4),round(ec[i+1][1],4)]]})
 
-        # ── Offset: exterior buffer only, no hole inward offset ──
         try:
             op = poly.buffer(2, join_style=2)
             oc = list(op.exterior.coords)
@@ -507,13 +427,9 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
                 lines.append({"id":str(uuid.uuid4()), "type":"offset", "kind":"line",
                                "coords":[[round(oc[i][0],4),round(oc[i][1],4)],
                                          [round(oc[i+1][0],4),round(oc[i+1][1],4)]]})
-            # Note: op.interiors would be inward hole offsets — not needed
         except: pass
 
     return lines
-
-
-
 
 def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, doc_out, raw_poly):
     cw, ch = params["panel_w"], params["panel_h"]
@@ -538,7 +454,6 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
     fps = [(translate(p,cox,coy),a,f,(c[0]+cox,c[1]+coy)) for p,a,f,c in fps]
     fp = [p for p,a,f,c in fps]
 
-    # Write DXF blockrefs
     for poly, ang, _, (ax, ay) in fps:
         msp_out.add_blockref(geo_block_name, (ax, ay), dxfattribs={
             'rotation': ang, 'xscale': 1.0, 'yscale': 1.0,
@@ -550,7 +465,6 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
     for cx, cy in [(4,4),(compw-4,4),(compw-4,comph-4),(4,comph-4)]:
         msp_out.add_circle((cx,cy), radius=1.53, dxfattribs={'layer':'PANEL_HOLES','color':7})
 
-    # Stats
     def get_groups(coords, tol=10.0):
         if not coords: return []
         sc = sorted(coords); g = [[sc[0]]]
@@ -558,40 +472,24 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
             if c-g[-1][-1]<tol: g[-1].append(c)
             else: g.append([c])
         return g
+
     def min_gap(polys, axis):
-        """
-        Find the minimum bounding-box gap between any pair of polys
-        along the given axis.
-        - axis='x': gap = neighbour.minx - current.maxx
-          (only count pairs where the neighbour is actually to the RIGHT,
-           i.e. their X ranges don't overlap in the perpendicular direction
-           OR we just want the raw bbox gap regardless)
-        - Positive = space between, 0 = touching, negative = bbox overlap (nesting)
-        """
         if len(polys) < 2: return 0.0
         min_g = float('inf')
         if axis == 'x':
-            # Sort by minx
             sp = sorted(polys, key=lambda p: p.bounds[0])
             for i in range(len(sp)):
                 for j in range(i+1, len(sp)):
-                    # gap = j.minx - i.maxx
                     g = sp[j].bounds[0] - sp[i].bounds[2]
-                    if g < min_g:
-                        min_g = g
-                    # Once g is positive and larger than current min, further j's
-                    # will only be larger — break inner loop
-                    if g > min_g + 50:
-                        break
+                    if g < min_g: min_g = g
+                    if g > min_g + 50: break
         else:
             sp = sorted(polys, key=lambda p: p.bounds[1])
             for i in range(len(sp)):
                 for j in range(i+1, len(sp)):
                     g = sp[j].bounds[1] - sp[i].bounds[3]
-                    if g < min_g:
-                        min_g = g
-                    if g > min_g + 50:
-                        break
+                    if g < min_g: min_g = g
+                    if g > min_g + 50: break
         return round(min_g, 4) if min_g != float('inf') else 0.0
 
     xg = get_groups([p.centroid.x for p in fp])
@@ -620,7 +518,6 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
         stats["extra_w"] = round(sew+lb+rb-compw, 3)
         stats["extra_h"] = round(seh+ub+db-comph, 3)
 
-    # Serialize polys for front-end canvas
     polys_data = []
     for poly, ang, _, (ax, ay) in fps:
         ext = [[x,y] for x,y in poly.exterior.coords]
@@ -629,26 +526,20 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
 
     return fps, stats, polys_data, compw, comph
 
-# ─────────────────────────────────────────────
-# Bridge geometry (Python-side, exact same as Colab)
-# ─────────────────────────────────────────────
 def calculate_bridge(data, lines, connectors):
     gap_half = 1.75
     l1 = lines[data['idx1']]
     l2 = lines[data['idx2']]
 
-    # Arcs cannot be split — treat them like body/hole
     def to_shapely_line(seg):
         if seg.get('kind') == 'arc':
-            return None  # will be kept intact
+            return None
         return LineString(seg['coords'])
 
     line1 = to_shapely_line(l1)
     line2 = to_shapely_line(l2)
 
     if line1 is None or line2 is None:
-        # At least one is an arc — no split, just add connector between projected points
-        # Use midpoint of arc for projection
         def arc_midpoint(seg):
             import math as _m
             a_mid = _m.radians((seg['a0'] + seg['a1']) / 2)
@@ -662,7 +553,6 @@ def calculate_bridge(data, lines, connectors):
 
     mx, my = (p1.x+p2.x)/2, (p1.y+p2.y)/2
 
-    # Use direction from whichever is a line segment
     ref = l1 if l1.get('kind','line') == 'line' else l2
     if ref.get('kind','line') == 'line':
         v1x = ref['coords'][1][0]-ref['coords'][0][0]
@@ -678,7 +568,6 @@ def calculate_bridge(data, lines, connectors):
     ang = math.degrees(math.atan2(uy,ux))
 
     def split(line_obj, seg, proj, ltype):
-        # arcs and body/hole lines are never split
         if ltype in ('body','hole') or seg.get('kind') == 'arc':
             new_seg = dict(seg)
             new_seg['id'] = str(uuid.uuid4())
@@ -709,16 +598,13 @@ def calculate_bridge(data, lines, connectors):
     new_connectors = list(connectors) + [connector]
     return new_lines, new_connectors
 
-# ─────────────────────────────────────────────
-# REST endpoints
-# ─────────────────────────────────────────────
+# ── REST endpoints ─────────────────────────────────────────────────────────────
 @app.get("/")
 async def index():
     return FileResponse("static/index.html")
 
 @app.post("/upload")
 async def upload_dxf(file: UploadFile = File(...)):
-    # 把原始 DXF 存到一個持久的暫存路徑，供後續 nest 重建 block 使用
     if SESSION.get('_src_dxf_path') and os.path.exists(SESSION['_src_dxf_path']):
         try: os.unlink(SESSION['_src_dxf_path'])
         except: pass
@@ -735,7 +621,7 @@ async def upload_dxf(file: UploadFile = File(...)):
         SESSION['geo_block_name'] = block_name
         SESSION['doc_out'] = doc_out
         SESSION['_src_dxf_path'] = tmp.name
-        SESSION['_orig_cx_cy'] = orig_cxy   # original DXF centroid for arc transforms
+        SESSION['_orig_cx_cy'] = orig_cxy
         SESSION['interactive_lines'] = []
         SESSION['manual_connectors'] = []
         SESSION['lines_history'] = []
@@ -795,13 +681,11 @@ async def nest(params: dict):
             SESSION['manual_connectors'] = []
             SESSION['lines_history'] = []
 
-            # Build arc-aware interactive lines from original DXF
             src_path = SESSION.get('_src_dxf_path')
             cx_cy = SESSION.get('_orig_cx_cy', (0.0, 0.0))
             if src_path and os.path.exists(src_path):
                 lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy)
             else:
-                # fallback: polygon segments
                 lines = []
                 for poly, ang, _, _ in fps:
                     ec = list(poly.exterior.coords)
@@ -825,7 +709,6 @@ async def nest(params: dict):
                     except: pass
             SESSION['interactive_lines'] = lines
 
-            # Add panel frame as 'frame' type segments
             panel_geo = create_rounded_panel(compw, comph, params.get('corner_r', 4.0))
             fc = list(panel_geo.exterior.coords)
             for i in range(len(fc)-1):
@@ -923,7 +806,6 @@ async def reset_bridge():
                 lines.append({"id":str(uuid.uuid4()),
                               "coords":[[ec[i][0],ec[i][1]],[ec[i+1][0],ec[i+1][1]]],
                               "type":"body","kind":"line"})
-    # Add panel frame
     if compw and comph:
         panel_geo = create_rounded_panel(compw, comph, r_corner)
         fc = list(panel_geo.exterior.coords)
@@ -937,10 +819,6 @@ async def reset_bridge():
 
 @app.post("/adjust")
 async def adjust(data: dict):
-    """
-    Add/remove one column or row by directly extending/trimming the layout.
-    No re-running of the nesting algorithm — uses stored step/count directly.
-    """
     mode    = SESSION.get('last_params', {}).get('mode', '')
     bsw     = SESSION.get('best_step_w', 0)
     bsh     = SESSION.get('best_step_h', 0)
@@ -962,10 +840,8 @@ async def adjust(data: dict):
 
     lb = params['left']; rb = params['right']
     ub = params['top'];  db = params['bottom']
-    spacing = params.get('spacing', 2)
 
     try:
-        # ── Rebuild doc with block ──────────────────────────
         doc_out = ezdxf.new('R2010')
         if src_path and os.path.exists(src_path):
             _, bn, _, _ = get_full_polygon_with_holes(src_path, doc_out)
@@ -977,38 +853,19 @@ async def adjust(data: dict):
                     try: nb.add_entity(ent.copy())
                     except: pass
 
-        # ── Reconstruct layout for new col/row count ────────
-        # Strategy: rebuild from raw_poly using the SAME step and pairing
-        # stored from the original nesting run.
-        #
-        # For Nesting: we stored the full best_layout list which has
-        # (poly, ang, is_bf, (tx, ty)) for every placed piece.
-        # The layout is arranged in a grid: each "cell" at (col, row) has
-        # two pieces (A at offset (0,0) and B at offset (dx_final, dy_final)).
-        # We reconstruct by re-placing pieces using the step.
-        #
-        # For Matrix / V-Cut: each cell has one piece.
-        # We use the first piece from best_layout to get the rotation and
-        # bounding-box placement anchor, then regenerate the grid.
-
         if "Nesting" in mode and SESSION.get('best_layout'):
             orig_bl = SESSION['best_layout']
-            # Each pair occupies two consecutive entries: (A, B) for each cell
-            # Extract the first pair to get ang_b, dx_final, dy_final
             if len(orig_bl) >= 2:
                 p_a, ang_a, _, (tx_a0, ty_a0) = orig_bl[0]
                 p_b, ang_b, _, (tx_b0, ty_b0) = orig_bl[1]
                 dx_final = tx_b0 - tx_a0
                 dy_final = ty_b0 - ty_a0
-
-                # The "offset_x/y" is the bbox origin of the pair unit
                 from shapely.affinity import rotate as shp_rotate
                 ba_ref = shp_rotate(raw, ang_a, origin=(0,0))
                 bb_ref = shp_rotate(raw, ang_b, origin=(0,0))
                 tb_placed = translate(bb_ref, dx_final, dy_final)
                 cb = unary_union([ba_ref, tb_placed]).bounds
                 offset_x, offset_y = cb[0], cb[1]
-
                 new_bl = []
                 for r in range(new_row):
                     for c in range(new_col):
@@ -1017,17 +874,12 @@ async def adjust(data: dict):
                         fa = translate(ba_ref, tx, ty)
                         fb = translate(tb_placed, tx, ty)
                         new_bl.append((fa, ang_a, False, (tx, ty)))
-                        new_bl.append((fb, ang_b, False,
-                                       (tx + dx_final, ty + dy_final)))
+                        new_bl.append((fb, ang_b, False, (tx + dx_final, ty + dy_final)))
             else:
                 new_bl = orig_bl
         else:
-            # Matrix / V-Cut: regenerate grid from raw_poly
             orig_bl = SESSION.get('best_layout', [])
-            if orig_bl:
-                _, ang, _, _ = orig_bl[0]
-            else:
-                ang = 0
+            ang = orig_bl[0][1] if orig_bl else 0
             tb = rotate(raw, ang, origin=(0,0))
             sx, sy, ex, ey = tb.bounds
             new_bl = []
@@ -1041,9 +893,7 @@ async def adjust(data: dict):
         if not new_bl:
             return JSONResponse({"ok":False,"error":"Cannot build layout"}, status_code=400)
 
-        # ── Build output with new layout ────────────────────
         new_params = dict(params)
-        # Panel size = exact fit for new_col/new_row
         new_params['panel_w'] = round(new_col * bsw + lb + rb, 4)
         new_params['panel_h'] = round(new_row * bsh + ub + db, 4)
 
@@ -1065,7 +915,6 @@ async def adjust(data: dict):
         SESSION['manual_connectors']  = []
         SESSION['lines_history']      = []
 
-        # Rebuild interactive lines
         cx_cy = SESSION.get('_orig_cx_cy', (0.0, 0.0))
         if src_path and os.path.exists(src_path):
             lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy)
@@ -1099,14 +948,14 @@ async def download_nest_dxf():
     with open(tmp.name,'rb') as f: data = f.read()
     os.unlink(tmp.name)
     return StreamingResponse(io.BytesIO(data), media_type="application/dxf",
-        headers={"Content-Disposition":f"attachment; filename=nested.dxf"})
+        headers={"Content-Disposition":"attachment; filename=nested.dxf"})
 
 @app.get("/download_bridge_dxf")
 async def download_bridge_dxf():
     compw = SESSION.get('compressed_w', 162.5)
     comph = SESSION.get('compressed_h', 190.5)
     fps   = SESSION.get('final_polys_with_info', [])
-    src_doc = SESSION.get('doc_out')           # 含 block 的 doc
+    src_doc = SESSION.get('doc_out')
     block_name = SESSION.get('geo_block_name', 'PART_GEO_BLOCK')
     R_corner, r_fix = 4.0, 2.0
 
@@ -1115,29 +964,23 @@ async def download_bridge_dxf():
     for lname, col in [('PARTS',7),('OFFSETS',4),('BRIDGES',2),('FRAME',7)]:
         doc.layers.new(lname, dxfattribs={'color': col})
 
-    # ── 1. 從 src_doc 複製 block 到新 doc，保留完整圓弧幾何 ──
     if src_doc and block_name in src_doc.blocks:
         src_block = src_doc.blocks[block_name]
         new_block = doc.blocks.new(name=block_name)
         for ent in src_block:
-            try:
-                new_block.add_entity(ent.copy())
-            except:
-                pass
+            try: new_block.add_entity(ent.copy())
+            except: pass
 
-    # ── 2. 以 blockref 插入每個零件（含旋轉，圓弧完整保留）──
     for poly, ang, _, (ax, ay) in fps:
         msp.add_blockref(block_name, (ax, ay), dxfattribs={
             'rotation': ang, 'xscale': 1.0, 'yscale': 1.0,
             'layer': 'PARTS', 'color': 7})
 
-    # ── 3. Offset 線段（橋接後已切斷的折線，不用圓弧）──
     for ld in SESSION.get('interactive_lines', []):
         if ld['type'] == 'offset':
             msp.add_line(ld['coords'][0], ld['coords'][1],
                          dxfattribs={'layer': 'OFFSETS'})
 
-    # ── 4. 橋接弧線 ──
     for b in SESSION.get('manual_connectors', []):
         if b.get('type') == 'precise_sandglass_arc':
             t = b['ang']
@@ -1148,7 +991,6 @@ async def download_bridge_dxf():
                         start_angle=t+90, end_angle=t+270,
                         dxfattribs={'layer': 'BRIDGES'})
 
-    # ── 5. 面板邊框與定位孔 ──
     centers = [(R_corner, R_corner), (compw-R_corner, R_corner),
                (compw-R_corner, comph-R_corner), (R_corner, comph-R_corner)]
     msp.add_line((R_corner, 0),      (compw-R_corner, 0),      dxfattribs={'layer': 'FRAME'})
@@ -1175,3 +1017,12 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+```
+
+---
+
+同時 `requirements.txt` 把 OAuth 相關的拿掉，換成：
+```
+google-auth==2.29.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.126.0
