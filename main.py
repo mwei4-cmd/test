@@ -1017,12 +1017,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-```
-
----
-
-同時 `requirements.txt` 把 OAuth 相關的拿掉，換成：
-```
-google-auth==2.29.0
-google-auth-httplib2==0.2.0
-google-api-python-client==2.126.0
