@@ -824,38 +824,25 @@ let currentStep = 0;
 function switchTab(name){
   const idx = STEPS.indexOf(name);
   currentStep = idx;
-
-  // Update panels
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
   document.getElementById('panel-'+name).classList.add('active');
-
-  // Update step indicators
   document.querySelectorAll('.step-item').forEach((el,i)=>{
     el.classList.remove('active','done');
     const circle = el.querySelector('.step-circle');
-    if(i === idx){
-      el.classList.add('active');
-      circle.textContent = i+1;
-    } else if(i < idx){
-      el.classList.add('done');
-      circle.textContent = '✓';
-    } else {
-      circle.textContent = i+1;
-    }
+    if(i === idx){ el.classList.add('active'); circle.textContent = i+1; }
+    else if(i < idx){ el.classList.add('done'); circle.textContent = '✓'; }
+    else { circle.textContent = i+1; }
   });
-
   if(name==='bridge') bridgeZoomReset();
   if(name==='nest') nestZoomReset();
 }
 
-// ── Preset ──
 function applyPreset(){
   const v=document.getElementById('preset').value;
   if(v==='160x200'){document.getElementById('pw').value=160;document.getElementById('ph').value=200;}
   else if(v==='200x250'){document.getElementById('pw').value=200;document.getElementById('ph').value=250;}
 }
 
-// Hide spacing for V-Cut
 document.getElementById('mode').addEventListener('change', function(){
   const isVcut = this.value.includes('V-Cut');
   const wrap = document.getElementById('spacing-wrap');
@@ -880,9 +867,7 @@ async function doUpload(file){
   if(d.ok){
     document.getElementById('run-btn').disabled=false;
     document.getElementById('upload-name').textContent=file.name+'\n'+d.w+'×'+d.h+' mm  '+d.holes+' hole(s)';
-  } else {
-    alert('Upload failed: '+d.error);
-  }
+  } else { alert('Upload failed: '+d.error); }
 }
 
 // ── Run nesting ──
@@ -899,7 +884,6 @@ async function runNesting(){
     corner_r:+document.getElementById('cr').value,
     mode:document.getElementById('mode').value,
   };
-
   document.getElementById('loading-msg').innerHTML =
     '<div style="text-align:center;font-family:var(--mono)">' +
     '<div id="prog-label" style="margin-bottom:12px;color:#b0b0b0;font-size:13px">Scanning directions</div>' +
@@ -908,17 +892,10 @@ async function runNesting(){
     '</div>' +
     '<div id="prog-pct" style="margin-top:10px;font-size:16px;font-weight:600;color:#f0f0f0">0%</div>' +
     '</div>';
-
-  const r = await fetch('/nest', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(params)
-  });
-
+  const r = await fetch('/nest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(params)});
   const reader = r.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
-
   while(true){
     const {done, value} = await reader.read();
     if(done) break;
@@ -942,22 +919,18 @@ async function runNesting(){
         nestState.polys=d.polys;
         nestState.compW=d.compressed_w;
         nestState.compH=d.compressed_h;
+        nestState.stats=d.stats;
         nestZoomReset(); nestDrawAll();
-        // 在 msg.type === 'done' 的處理末尾加：
-        nestState.stats = d.stats;   // 先存起來
-        sheetAutoFill();             // 自動帶入
-        if(d.top3&&d.top3.length){
-          // delay so flex gives #c3-0 its rendered size before drawing
-          setTimeout(()=>drawBestPair(d.top3[0]), 50);
-        }
+        if(d.top3&&d.top3.length){ setTimeout(()=>drawBestPair(d.top3[0]), 50); }
         renderMetrics(d.stats);
         renderSuggest(d.stats);
         bridgeState.lines=d.lines;
         bridgeState.connectors=[];
         bridgeState.compW=d.compressed_w;
         bridgeState.compH=d.compressed_h;
-        nestDrawAll();  // redraw with full lines (offset, frame, arcs)
+        nestDrawAll();
         renderStatsTable(d.stats);
+        sheetAutoFill();   // ← 排版完成後自動帶入 Sheet bar
       } else if(msg.type === 'error'){
         hideLoading();
         alert('Layout failed: '+msg.msg);
@@ -967,20 +940,16 @@ async function runNesting(){
   hideLoading();
 }
 
-// ─────────────────────────────────────────────
-// NEST CANVAS
-// ─────────────────────────────────────────────
-const nestState={polys:[],compW:0,compH:0,scale:1,ox:0,oy:0,drag:false,lx:0,ly:0};
+// ── Nest Canvas ──
+const nestState={polys:[],compW:0,compH:0,scale:1,ox:0,oy:0,drag:false,lx:0,ly:0,stats:null};
 const nc=document.getElementById('nest-canvas');
 
 function nestZoomReset(){
   const cw=nc.clientWidth, ch=nc.clientHeight;
   if(!nestState.compW||!nestState.compH)return;
   const pad=24;
-  // fit-contain: scale so panel fits inside canvas with equal padding on all sides
   const s=Math.min((cw-pad*2)/nestState.compW,(ch-pad*2)/nestState.compH);
   nestState.scale=s;
-  // center horizontally and vertically (Y-axis flipped: oy is bottom of panel in canvas coords)
   nestState.ox=(cw-nestState.compW*s)/2;
   nestState.oy=(ch+nestState.compH*s)/2;
   nestDrawAll();
@@ -989,8 +958,7 @@ function nestZoomReset(){
 function nestDrawAll(){
   const dpr=window.devicePixelRatio||1;
   if(nc.width!==nc.clientWidth*dpr||nc.height!==nc.clientHeight*dpr){
-    nc.width=nc.clientWidth*dpr;
-    nc.height=nc.clientHeight*dpr;
+    nc.width=nc.clientWidth*dpr; nc.height=nc.clientHeight*dpr;
   }
   const ctx=nc.getContext('2d');
   ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -999,11 +967,7 @@ function nestDrawAll(){
   if(!compW)return;
   ctx.clearRect(0,0,cw,ch);
   ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);
-
-  function tx(x){return ox+x*s;}
-  function ty(y){return oy-y*s;}
-
-  // Use bridge lines for complete rendering (body, hole, offset, frame)
+  function tx(x){return ox+x*s;} function ty(y){return oy-y*s;}
   const blines = bridgeState.lines;
   if(blines && blines.length>0){
     const dw=Math.max(0.6, Math.min(1.6/Math.pow(s/8,0.35), 2.0));
@@ -1011,33 +975,22 @@ function nestDrawAll(){
       ctx.beginPath();
       if(l.kind==='arc'){
         const cx2=tx(l.cx), cy2=ty(l.cy), r2=l.r*s;
-        if(Math.abs(((l.a1-l.a0)+360)%360)<0.1||Math.abs(l.a1-l.a0)>=359.9){
-          ctx.arc(cx2,cy2,r2,0,Math.PI*2);
-        } else {
-          const a0r=l.a0*Math.PI/180, a1r=l.a1*Math.PI/180;
-          ctx.arc(cx2,cy2,r2,-a0r,-a1r,true);
-        }
+        if(Math.abs(((l.a1-l.a0)+360)%360)<0.1||Math.abs(l.a1-l.a0)>=359.9){ ctx.arc(cx2,cy2,r2,0,Math.PI*2); }
+        else { const a0r=l.a0*Math.PI/180, a1r=l.a1*Math.PI/180; ctx.arc(cx2,cy2,r2,-a0r,-a1r,true); }
       } else {
         ctx.moveTo(tx(l.coords[0][0]),ty(l.coords[0][1]));
         ctx.lineTo(tx(l.coords[1][0]),ty(l.coords[1][1]));
       }
-      if(l.type==='body'||l.type==='hole'){
-        ctx.strokeStyle='#e8e8e8';ctx.lineWidth=dw;
-      } else if(l.type==='offset'){
-        ctx.strokeStyle='#2ac3de';ctx.lineWidth=Math.max(0.6,dw*0.75);
-      } else if(l.type==='frame'){
-        ctx.strokeStyle='#505050';ctx.lineWidth=Math.max(0.8,dw);
-      }
+      if(l.type==='body'||l.type==='hole'){ ctx.strokeStyle='#e8e8e8';ctx.lineWidth=dw; }
+      else if(l.type==='offset'){ ctx.strokeStyle='#2ac3de';ctx.lineWidth=Math.max(0.6,dw*0.75); }
+      else if(l.type==='frame'){ ctx.strokeStyle='#505050';ctx.lineWidth=Math.max(0.8,dw); }
       ctx.stroke();
     });
-
-    // Registration holes (always draw — they are part of DXF but not in interactive lines)
     [[4,4],[compW-4,4],[compW-4,compH-4],[4,compH-4]].forEach(([cx,cy])=>{
       ctx.beginPath();ctx.arc(tx(cx),ty(cy),1.53*s,0,Math.PI*2);
       ctx.strokeStyle='#505050';ctx.lineWidth=0.8;ctx.stroke();
     });
   } else {
-    // Fallback: draw from nestState.polys (before bridge lines are ready)
     ctx.strokeStyle='#505050';ctx.lineWidth=1;
     ctx.strokeRect(tx(0),ty(compH),compW*s,compH*s);
     nestState.polys.forEach(p=>{
@@ -1057,16 +1010,13 @@ function nestDrawAll(){
   }
 }
 
-// Nest canvas events
 nc.onwheel=e=>{
   e.preventDefault();
   const r=nc.getBoundingClientRect();
   const mx=e.clientX-r.left, my=e.clientY-r.top;
   const wx=(mx-nestState.ox)/nestState.scale, wy=(nestState.oy-my)/nestState.scale;
   const w=e.deltaY<0?1.15:.85;
-  nestState.scale*=w;
-  nestState.ox=mx-wx*nestState.scale;
-  nestState.oy=my+wy*nestState.scale;
+  nestState.scale*=w; nestState.ox=mx-wx*nestState.scale; nestState.oy=my+wy*nestState.scale;
   nestDrawAll();
 };
 nc.onmousedown=e=>{if(e.button===1){nestState.drag=true;nestState.lx=e.clientX;nestState.ly=e.clientY;e.preventDefault();}};
@@ -1079,11 +1029,9 @@ nc.onmousemove=e=>{
 };
 window.addEventListener('resize',()=>{nestDrawAll();bridgeDrawAll();});
 
-// Best pair mini canvas (rank #1 only)
 function drawBestPair(t){
   const c=document.getElementById('c3-0');
   const dpr=window.devicePixelRatio||1;
-  // use actual rendered size (flex fills the right column)
   const cw=c.clientWidth, ch=c.clientHeight;
   c.width=cw*dpr; c.height=ch*dpr;
   const ctx=c.getContext('2d');
@@ -1098,18 +1046,15 @@ function drawBestPair(t){
   const ox=(cw-(maxx-minx)*s)/2, oy=(ch+(maxy-miny)*s)/2;
   const tx=x=>ox+(x-minx)*s, ty=y=>oy-(y-miny)*s;
   const fill=(pts,col)=>{
-    ctx.beginPath();
-    pts.forEach(([x,y],i)=>i===0?ctx.moveTo(tx(x),ty(y)):ctx.lineTo(tx(x),ty(y)));
+    ctx.beginPath(); pts.forEach(([x,y],i)=>i===0?ctx.moveTo(tx(x),ty(y)):ctx.lineTo(tx(x),ty(y)));
     ctx.closePath(); ctx.fillStyle=col; ctx.fill();
   };
-  fill(t.p1,'rgba(240,240,240,.9)');
-  fill(t.p2,'rgba(90,90,90,.9)');
+  fill(t.p1,'rgba(240,240,240,.9)'); fill(t.p2,'rgba(90,90,90,.9)');
 }
 
-// Metrics — 2-col infobar
 function renderMetrics(s){
   document.getElementById('nest-infobar').style.display='flex';
-  document.getElementById('si-pcs').innerHTML  = s.pcs+'<span class="stat-unit">pcs</span>';
+  document.getElementById('si-pcs').innerHTML = s.pcs+'<span class="stat-unit">pcs</span>';
   document.getElementById('si-grid').textContent= s.cols+' × '+s.rows;
   document.getElementById('adj-btns').style.display='flex';
   document.getElementById('si-orig').textContent = s.original_w+' × '+s.original_h+' mm';
@@ -1118,31 +1063,22 @@ function renderMetrics(s){
 
 async function adjustLayout(dcol, drow){
   showLoading(dcol>0?'+1 col':dcol<0?'−1 col':drow>0?'+1 row':'−1 row');
-  const r=await fetch('/adjust',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({dcol,drow})});
+  const r=await fetch('/adjust',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dcol,drow})});
   hideLoading();
   const d=await r.json();
   if(!d.ok){alert('Adjust failed: '+d.error);return;}
-
-  // Update panel size inputs to reflect new size
   document.getElementById('pw').value=d.panel_w;
   document.getElementById('ph').value=d.panel_h;
-
-  // Re-render exactly like after a full nest
-  nestState.polys=d.polys;
-  nestState.compW=d.compressed_w;
-  nestState.compH=d.compressed_h;
+  nestState.polys=d.polys; nestState.compW=d.compressed_w; nestState.compH=d.compressed_h;
+  nestState.stats=d.stats;
   nestZoomReset(); nestDrawAll();
-  renderMetrics(d.stats);
-  renderSuggest(d.stats);
-  bridgeState.lines=d.lines;
-  bridgeState.connectors=[];
-  bridgeState.compW=d.compressed_w;
-  bridgeState.compH=d.compressed_h;
-  nestDrawAll();
-  renderStatsTable(d.stats);
+  renderMetrics(d.stats); renderSuggest(d.stats);
+  bridgeState.lines=d.lines; bridgeState.connectors=[];
+  bridgeState.compW=d.compressed_w; bridgeState.compH=d.compressed_h;
+  nestDrawAll(); renderStatsTable(d.stats);
+  sheetAutoFill();  // ← adjust 後也更新
 }
+
 function renderSuggest(s){
   const el=document.getElementById('si-suggest');
   if(!s.suggest_w){el.style.visibility='hidden';return;}
@@ -1150,6 +1086,7 @@ function renderSuggest(s){
   document.getElementById('si-sug-col').textContent= 'W ≥ '+s.suggest_w+' mm';
   document.getElementById('si-sug-row').textContent= 'H ≥ '+s.suggest_h+' mm';
 }
+
 function renderStatsTable(s){
   document.getElementById('stats-table').style.display='block';
   const suggestRows = s.suggest_w ? `
@@ -1169,21 +1106,17 @@ function renderStatsTable(s){
   `;
 }
 
-// ─────────────────────────────────────────────
-// BRIDGE CANVAS
-// ─────────────────────────────────────────────
+// ── Bridge Canvas ──
 const bridgeState={
   lines:[], connectors:[], compW:0, compH:0,
   scale:1, ox:0, oy:0, drag:false, lx:0, ly:0,
   hover:-1, selected:[], firstPt:null
 };
-
 const TYPE_COLOR={
-  body:  {n:'#e8e8e8', g:'#ffffff'},
-  hole:  {n:'#e8e8e8', g:'#ffffff'},
-  offset:{n:'#2ac3de', g:'#5ad8ec'},
-  frame: {n:'#383838', g:'#505050'},  // dark grey, not selectable
+  body:{n:'#e8e8e8',g:'#ffffff'}, hole:{n:'#e8e8e8',g:'#ffffff'},
+  offset:{n:'#2ac3de',g:'#5ad8ec'}, frame:{n:'#383838',g:'#505050'},
 };
+const bc=document.getElementById('bridge-canvas');
 
 function bridgeZoomReset(){
   const cw=bc.clientWidth, ch=bc.clientHeight;
@@ -1199,77 +1132,47 @@ function bridgeZoomReset(){
 function bridgeDrawAll(){
   const dpr=window.devicePixelRatio||1;
   if(bc.width!==bc.clientWidth*dpr||bc.height!==bc.clientHeight*dpr){
-    bc.width=bc.clientWidth*dpr;
-    bc.height=bc.clientHeight*dpr;
+    bc.width=bc.clientWidth*dpr; bc.height=bc.clientHeight*dpr;
   }
   const ctx=bc.getContext('2d');
   ctx.setTransform(dpr,0,0,dpr,0,0);
   const cw=bc.clientWidth, ch=bc.clientHeight;
   const {scale:s,ox,oy,lines,connectors,hover,selected,firstPt,compW,compH}=bridgeState;
-  ctx.clearRect(0,0,cw,ch);
-  ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);
+  ctx.clearRect(0,0,cw,ch); ctx.fillStyle='#000';ctx.fillRect(0,0,cw,ch);
   if(!compW)return;
-
   const tx=x=>ox+x*s, ty=y=>oy-y*s;
-  // base line width: fixed minimum so lines never disappear at any zoom
   const dw=Math.max(0.8, Math.min(2.0/Math.pow(s/8, 0.35), 2.5));
-
-  // ── Panel frame (always drawn first, behind parts) ──
   ctx.strokeStyle='#2a2a2a';ctx.lineWidth=1;ctx.setLineDash([8,4]);
-  ctx.strokeRect(tx(0),ty(compH),compW*s,compH*s);
-  ctx.setLineDash([]);
-
-  // ── Line segments ──
+  ctx.strokeRect(tx(0),ty(compH),compW*s,compH*s); ctx.setLineDash([]);
   lines.forEach((l,i)=>{
     const st=TYPE_COLOR[l.type]||TYPE_COLOR.body;
     const isS=selected.includes(i), isH=(i===hover);
     ctx.beginPath();
-
     if(l.kind==='arc'){
       const cx2=tx(l.cx), cy2=ty(l.cy), r2=l.r*s;
-      if(Math.abs(((l.a1-l.a0)+360)%360)<0.1 || Math.abs(l.a1-l.a0)>=359.9){
-        ctx.arc(cx2,cy2,r2,0,Math.PI*2);
-      } else {
-        const a0=l.a0*Math.PI/180, a1=l.a1*Math.PI/180;
-        ctx.arc(cx2,cy2,r2,-a0,-a1,true);
-      }
+      if(Math.abs(((l.a1-l.a0)+360)%360)<0.1||Math.abs(l.a1-l.a0)>=359.9){ ctx.arc(cx2,cy2,r2,0,Math.PI*2); }
+      else { const a0=l.a0*Math.PI/180, a1=l.a1*Math.PI/180; ctx.arc(cx2,cy2,r2,-a0,-a1,true); }
     } else {
       ctx.moveTo(tx(l.coords[0][0]),ty(l.coords[0][1]));
       ctx.lineTo(tx(l.coords[1][0]),ty(l.coords[1][1]));
     }
-
-    if(isS){
-      ctx.strokeStyle='#ffffff';ctx.lineWidth=dw*3;ctx.shadowBlur=0;
-    } else if(isH){
-      ctx.strokeStyle=st.g;ctx.lineWidth=dw*2.5;ctx.shadowBlur=6;ctx.shadowColor=st.g;
-    } else if(l.type==='offset'){
-      // offset: fixed minimum 0.8px so it never disappears
-      ctx.strokeStyle=st.n;ctx.lineWidth=Math.max(0.8,dw*0.85);ctx.shadowBlur=0;
-    } else {
-      ctx.strokeStyle=st.n;ctx.lineWidth=dw;ctx.shadowBlur=0;
-    }
+    if(isS){ ctx.strokeStyle='#ffffff';ctx.lineWidth=dw*3;ctx.shadowBlur=0; }
+    else if(isH){ ctx.strokeStyle=st.g;ctx.lineWidth=dw*2.5;ctx.shadowBlur=6;ctx.shadowColor=st.g; }
+    else if(l.type==='offset'){ ctx.strokeStyle=st.n;ctx.lineWidth=Math.max(0.8,dw*0.85);ctx.shadowBlur=0; }
+    else { ctx.strokeStyle=st.n;ctx.lineWidth=dw;ctx.shadowBlur=0; }
     ctx.stroke();ctx.shadowBlur=0;
   });
-
-  // ── Bridge connectors ──
   connectors.forEach(b=>{
     ctx.strokeStyle='#e0e0e0';ctx.lineWidth=dw*1.5;
     const rad=b.r*s, ar=b.ang*Math.PI/180;
     ctx.beginPath();ctx.arc(tx(b.lx),ty(b.ly),rad,-ar-Math.PI/2,-ar+Math.PI/2);ctx.stroke();
     ctx.beginPath();ctx.arc(tx(b.rx),ty(b.ry),rad,-ar+Math.PI/2,-ar+1.5*Math.PI);ctx.stroke();
   });
-
-  if(firstPt){
-    ctx.fillStyle='#ffffff';ctx.beginPath();
-    ctx.arc(tx(firstPt.x),ty(firstPt.y),3,0,Math.PI*2);ctx.fill();
-  }
+  if(firstPt){ ctx.fillStyle='#ffffff';ctx.beginPath();ctx.arc(tx(firstPt.x),ty(firstPt.y),3,0,Math.PI*2);ctx.fill(); }
 }
 
-// Bridge mouse helpers
-const bc=document.getElementById('bridge-canvas');
 function fromBX(cx){const r=bc.getBoundingClientRect();return(cx-r.left-bridgeState.ox)/bridgeState.scale;}
 function fromBY(cy){const r=bc.getBoundingClientRect();return(bridgeState.oy-(cy-r.top))/bridgeState.scale;}
-
 bc.addEventListener('contextmenu',e=>e.preventDefault());
 bc.onwheel=e=>{
   e.preventDefault();
@@ -1277,9 +1180,7 @@ bc.onwheel=e=>{
   const mx=e.clientX-r.left, my=e.clientY-r.top;
   const wx=fromBX(e.clientX), wy=fromBY(e.clientY);
   const w=e.deltaY<0?1.15:.85;
-  bridgeState.scale*=w;
-  bridgeState.ox=mx-wx*bridgeState.scale;
-  bridgeState.oy=my+wy*bridgeState.scale;
+  bridgeState.scale*=w; bridgeState.ox=mx-wx*bridgeState.scale; bridgeState.oy=my+wy*bridgeState.scale;
   bridgeDrawAll();
 };
 bc.onmousedown=e=>{
@@ -1287,22 +1188,16 @@ bc.onmousedown=e=>{
   else if(e.button===0&&bridgeState.hover!==-1){
     const rx=fromBX(e.clientX), ry=fromBY(e.clientY);
     if(bridgeState.selected.length===0){
-      bridgeState.selected=[bridgeState.hover];
-      bridgeState.firstPt={x:rx,y:ry};
+      bridgeState.selected=[bridgeState.hover]; bridgeState.firstPt={x:rx,y:ry};
       setStatus('Selected first segment ('+bridgeState.lines[bridgeState.hover].type+') — select second');
     } else {
-      if(bridgeState.hover===bridgeState.selected[0]){
-        bridgeState.selected=[];bridgeState.firstPt=null;setStatus('Selection cleared');
-      } else {
-        doBridge(bridgeState.selected[0],bridgeState.firstPt,bridgeState.hover);
-        bridgeState.selected=[];bridgeState.firstPt=null;
-      }
+      if(bridgeState.hover===bridgeState.selected[0]){ bridgeState.selected=[];bridgeState.firstPt=null;setStatus('Selection cleared'); }
+      else { doBridge(bridgeState.selected[0],bridgeState.firstPt,bridgeState.hover); bridgeState.selected=[];bridgeState.firstPt=null; }
     }
     bridgeDrawAll();
   }
 };
 bc.onmousemove=e=>{
-  const r=bc.getBoundingClientRect();
   const rx=fromBX(e.clientX),ry=fromBY(e.clientY);
   if(bridgeState.drag){
     bridgeState.ox+=e.clientX-bridgeState.lx;bridgeState.oy+=e.clientY-bridgeState.ly;
@@ -1311,25 +1206,19 @@ bc.onmousemove=e=>{
   let lh=bridgeState.hover; bridgeState.hover=-1;
   let md=16/bridgeState.scale;
   bridgeState.lines.forEach((l,i)=>{
-    if(l.type==='frame') return;  // frame not selectable
+    if(l.type==='frame') return;
     let d;
     if(l.kind==='arc'){
-      // distance from point to arc = |dist_to_centre - radius|
       const dx=rx-l.cx, dy=ry-l.cy;
-      const distToCenter=Math.sqrt(dx*dx+dy*dy);
-      d=Math.abs(distToCenter-l.r);
-      // check if the angle is within the arc's sweep
+      d=Math.abs(Math.sqrt(dx*dx+dy*dy)-l.r);
       if(d<md && Math.abs(l.a1-l.a0)<359.9){
-        let ang=Math.atan2(dy,dx)*180/Math.PI;
-        if(ang<0) ang+=360;
+        let ang=Math.atan2(dy,dx)*180/Math.PI; if(ang<0) ang+=360;
         let a0=l.a0%360, a1=l.a1%360;
-        // normalize to check containment
         const inArc = a1>a0 ? (ang>=a0&&ang<=a1) : (ang>=a0||ang<=a1);
         if(!inArc) d=Infinity;
       }
     } else {
-      const lx0=l.coords[0][0],ly0=l.coords[0][1];
-      const lx1=l.coords[1][0],ly1=l.coords[1][1];
+      const lx0=l.coords[0][0],ly0=l.coords[0][1],lx1=l.coords[1][0],ly1=l.coords[1][1];
       const ldx=lx0-lx1, ldy=ly0-ly1, d2=ldx*ldx+ldy*ldy;
       let t=d2===0?0:Math.max(0,Math.min(1,((rx-lx0)*(lx1-lx0)+(ry-ly0)*(ly1-ly0))/d2));
       d=Math.sqrt((rx-(lx0+t*(lx1-lx0)))**2+(ry-(ly0+t*(ly1-ly0)))**2);
@@ -1340,19 +1229,14 @@ bc.onmousemove=e=>{
 };
 
 function setStatus(msg){document.getElementById('bridge-status').textContent=msg;}
-
 async function doBridge(idx1,pt1,idx2){
   setStatus('計算中...');
-  const r=await fetch('/bridge',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({idx1,pt1:[pt1.x,pt1.y],idx2})});
+  const r=await fetch('/bridge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idx1,pt1:[pt1.x,pt1.y],idx2})});
   const d=await r.json();
   if(!d.ok){setStatus('Error: '+d.error);return;}
-  bridgeState.lines=d.lines;
-  bridgeState.connectors=d.connectors;
-  setStatus('Bridge added  —  total: '+d.connectors.length);
-  bridgeDrawAll();
+  bridgeState.lines=d.lines; bridgeState.connectors=d.connectors;
+  setStatus('Bridge added  —  total: '+d.connectors.length); bridgeDrawAll();
 }
-
 async function undoBridge(){
   const r=await fetch('/undo',{method:'POST'});
   const d=await r.json();
@@ -1364,15 +1248,11 @@ async function resetBridge(){
   if(d.ok){bridgeState.lines=d.lines;bridgeState.connectors=[];bridgeDrawAll();setStatus('Reset complete');}
 }
 
-// ── Downloads ──
 function downloadNest(){window.location='/download_nest_dxf';}
 function downloadBridge(){window.location='/download_bridge_dxf';}
-
-// ── Loading ──
 function showLoading(msg){document.getElementById('loading-msg').textContent=msg;document.getElementById('loading').classList.add('show');}
 function hideLoading(){document.getElementById('loading').classList.remove('show');}
 
-<script>
 // ════════════════════════════════
 //  Sheet Calculator
 // ════════════════════════════════
@@ -1386,7 +1266,6 @@ async function sheetInit() {
       sheetLoadDropdowns();
     }
   } catch(e) {}
-  // 無論登入與否，都顯示 bar
   document.getElementById('sh-bar').style.display = 'flex';
 }
 
@@ -1398,22 +1277,15 @@ function _shLoggedIn() {
   document.getElementById('sh-inputs').style.display = 'flex';
 }
 
-function sheetLogin()  { window.location.href = '/auth/login'; }
-async function sheetLogout() {
-  await fetch('/auth/logout');
-  location.reload();
-}
+function sheetLogin() { window.location.href = '/auth/login'; }
+async function sheetLogout() { await fetch('/auth/logout'); location.reload(); }
 
-// 自動帶入排版結果（在 done SSE 處理完後呼叫）
 function sheetAutoFill() {
   const s = nestState.stats;
   if (!s) return;
-  const set = (id, val) => {
-    if (val != null) document.getElementById(id).value = +val;
-  };
-  // ↓ 把 key 名稱對應到你 stats 裡實際的欄位
-  set('sh-B11', s.pcb_w  ?? s.p_w);
-  set('sh-C11', s.pcb_h  ?? s.p_h);
+  const set = (id, val) => { if (val != null) document.getElementById(id).value = +val; };
+  set('sh-B11', s.p_w);
+  set('sh-C11', s.p_h);
   set('sh-D11', s.cols);
   set('sh-E11', s.rows);
 }
@@ -1424,10 +1296,7 @@ async function sheetLoadDropdowns() {
     const res = await fetch('/sheet/dropdown_options');
     if (res.status === 401) { box.innerHTML = ''; return; }
     const { options, error } = await res.json();
-    if (error) {
-      box.innerHTML = `<span style="color:#f55;font-size:10px;">${error}</span>`;
-      return;
-    }
+    if (error) { box.innerHTML = `<span style="color:#f55;font-size:10px;">${error}</span>`; return; }
     box.innerHTML = '';
     SH_CELLS.forEach((cell, i) => {
       const opts = options[i] || [];
@@ -1435,12 +1304,10 @@ async function sheetLoadDropdowns() {
       wrap.style.cssText = 'display:flex;align-items:center;gap:3px;';
       wrap.innerHTML = `
         <span style="font-size:10px;color:var(--text3);font-family:var(--mono);white-space:nowrap;">${cell}</span>
-        <select id="sh-${cell}" style="
-          background:var(--bg3);border:1px solid var(--border2);
-          border-radius:3px;color:var(--text);padding:3px 5px;
-          font-size:11px;font-family:var(--mono);">
+        <select id="sh-${cell}" style="background:var(--bg3);border:1px solid var(--border2);
+          border-radius:3px;color:var(--text);padding:3px 5px;font-size:11px;font-family:var(--mono);">
           <option value="">—</option>
-          ${opts.map(o => `<option value="${o}">${o}</option>`).join('')}
+          ${opts.map(o=>`<option value="${o}">${o}</option>`).join('')}
         </select>`;
       box.appendChild(wrap);
     });
@@ -1452,51 +1319,35 @@ async function sheetLoadDropdowns() {
 async function sheetCalculate() {
   const status = document.getElementById('sh-status');
   const result = document.getElementById('sh-result');
-
   const payload = {};
   ['B11','C11','D11','E11','F11','G11','H11','I11','J11'].forEach(k => {
     const el = document.getElementById(`sh-${k}`);
     const v = parseFloat(el?.value);
     payload[k] = isNaN(v) ? '' : v;
   });
-  SH_CELLS.forEach(k => {
-    payload[k] = document.getElementById(`sh-${k}`)?.value ?? '';
-  });
-
-  status.textContent = 'writing…';
-  status.style.color = 'var(--text3)';
+  SH_CELLS.forEach(k => { payload[k] = document.getElementById(`sh-${k}`)?.value ?? ''; });
+  status.textContent = 'writing…'; status.style.color = 'var(--text3)';
   result.style.display = 'none';
-
   try {
-    const res = await fetch('/sheet/calculate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+    const res = await fetch('/sheet/calculate',{
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
     });
-    if (res.status === 401) {
-      status.textContent = 'not logged in';
-      status.style.color = '#f55';
-      return;
-    }
+    if(res.status===401){ status.textContent='not logged in'; status.style.color='#f55'; return; }
     const data = await res.json();
-    if (data.error) throw new Error(data.error);
-
+    if(data.error) throw new Error(data.error);
     document.getElementById('sh-c27').textContent = data.C27 || '—';
     document.getElementById('sh-c28').textContent = data.C28 || '—';
     result.style.display = 'flex';
-    status.textContent = '✓';
-    status.style.color = 'var(--accent)';
+    status.textContent = '✓'; status.style.color = 'var(--accent)';
   } catch(e) {
-    status.textContent = e.message;
-    status.style.color = '#f55';
+    status.textContent = e.message; status.style.color = '#f55';
   }
 }
 
-document.addEventListener('DOMContentLoaded', sheetInit);
-</script>
-  
-// Init
-nestZoomReset();
+document.addEventListener('DOMContentLoaded', () => {
+  sheetInit();
+  nestZoomReset();
+});
 </script>
 </body>
 </html>
