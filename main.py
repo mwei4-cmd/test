@@ -1,9 +1,10 @@
 import io, math, time, tempfile, os, uuid, json
 from typing import Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 import numpy as np
 
 import ezdxf
@@ -17,8 +18,7 @@ try:
 except ImportError:
     JS_ROUND = 1
 
-import os, json, time
-from starlette.middleware.sessions import SessionMiddleware
+
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
