@@ -82,59 +82,24 @@ async def sheet_dropdown_options():
 # ── 寫入 Sheet + 讀回計算結果 ─────────────────────────────────────────────────
 @app.post("/sheet/calculate")
 async def sheet_calculate(request: Request):
+    import traceback
     svc = _get_service()
     if not svc:
         return JSONResponse({"error": "Service Account 未設定"}, status_code=401)
 
     body = await request.json()
+    print(f"[Sheet] body received: {body}")
 
     try:
         sheets = svc.spreadsheets()
+        print(f"[Sheet] SHEET_ID={SHEET_ID}, SHEET_TAB={SHEET_TAB}")
 
-        # ── 第一段：寫入 B11:J11（數值欄，一次寫完）────────────────
-        sheets.values().batchUpdate(
-            spreadsheetId=SHEET_ID,
-            body={
-                "valueInputOption": "USER_ENTERED",
-                "data": [
-                    {"range": f"{SHEET_TAB}!B11", "values": [[body.get("B11", "")]]},
-                    {"range": f"{SHEET_TAB}!C11", "values": [[body.get("C11", "")]]},
-                    {"range": f"{SHEET_TAB}!D11", "values": [[body.get("D11", "")]]},
-                    {"range": f"{SHEET_TAB}!E11", "values": [[body.get("E11", "")]]},
-                    {"range": f"{SHEET_TAB}!F11", "values": [[body.get("F11", "")]]},
-                    {"range": f"{SHEET_TAB}!G11", "values": [[body.get("G11", "")]]},
-                    {"range": f"{SHEET_TAB}!H11", "values": [[body.get("H11", "")]]},
-                    {"range": f"{SHEET_TAB}!I11", "values": [[body.get("I11", "")]]},
-                    {"range": f"{SHEET_TAB}!J11", "values": [[body.get("J11", 250)]]},
-                ]
-            }
-        ).execute()
-
-        # ── 第二段：逐一寫入 C14:C20（Data Validation 儲存格）────────
-        # 用 RAW 模式避免觸發格式驗證錯誤
-        for cell, key in [("C14","C14"),("C15","C15"),("C16","C16"),
-                           ("C17","C17"),("C18","C18"),("C19","C19"),("C20","C20")]:
-            val = body.get(key, "")
-            if val == "" or val is None:
-                continue  # 空值跳過，不覆蓋原有選項
-            try:
-                sheets.values().update(
-                    spreadsheetId=SHEET_ID,
-                    range=f"{SHEET_TAB}!{cell}",
-                    valueInputOption="USER_ENTERED",
-                    body={"values": [[val]]}
-                ).execute()
-            except Exception as cell_err:
-                print(f"[Sheet] {cell} write failed: {cell_err}")
-                # 單格失敗不中斷，繼續寫下一格
-
-        time.sleep(1.5)
-
-        # ── 讀回 C27, C28 ─────────────────────────────────────────────
+        # 先只測試讀取，不寫入
         result = sheets.values().batchGet(
             spreadsheetId=SHEET_ID,
             ranges=[f"{SHEET_TAB}!C27", f"{SHEET_TAB}!C28"],
         ).execute()
+        print(f"[Sheet] read result: {result}")
 
         vr  = result.get("valueRanges", [])
         c27 = vr[0]["values"][0][0] if vr[0].get("values") else ""
@@ -143,7 +108,9 @@ async def sheet_calculate(request: Request):
         return {"C27": c27, "C28": c28}
 
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        tb = traceback.format_exc()
+        print(f"[Sheet] ERROR:\n{tb}")
+        return JSONResponse({"error": str(e), "detail": tb}, status_code=500)
 
 # ── In-memory session ──────────────────────────────────────────────────────────
 SESSION = {
