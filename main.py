@@ -91,32 +91,46 @@ async def sheet_calculate(request: Request):
     try:
         sheets = svc.spreadsheets()
 
-        write_data = [
-            {"range": f"{SHEET_TAB}!B11", "values": [[body.get("B11", "")]]},
-            {"range": f"{SHEET_TAB}!C11", "values": [[body.get("C11", "")]]},
-            {"range": f"{SHEET_TAB}!D11", "values": [[body.get("D11", "")]]},
-            {"range": f"{SHEET_TAB}!E11", "values": [[body.get("E11", "")]]},
-            {"range": f"{SHEET_TAB}!F11", "values": [[body.get("F11", "")]]},
-            {"range": f"{SHEET_TAB}!G11", "values": [[body.get("G11", "")]]},
-            {"range": f"{SHEET_TAB}!H11", "values": [[body.get("H11", "")]]},
-            {"range": f"{SHEET_TAB}!I11", "values": [[body.get("I11", "")]]},
-            {"range": f"{SHEET_TAB}!J11", "values": [[body.get("J11", 250)]]},
-            {"range": f"{SHEET_TAB}!C14", "values": [[body.get("C14", "")]]},
-            {"range": f"{SHEET_TAB}!C15", "values": [[body.get("C15", "")]]},
-            {"range": f"{SHEET_TAB}!C16", "values": [[body.get("C16", "")]]},
-            {"range": f"{SHEET_TAB}!C17", "values": [[body.get("C17", "")]]},
-            {"range": f"{SHEET_TAB}!C18", "values": [[body.get("C18", "")]]},
-            {"range": f"{SHEET_TAB}!C19", "values": [[body.get("C19", "")]]},
-            {"range": f"{SHEET_TAB}!C20", "values": [[body.get("C20", "")]]},
-        ]
-
+        # ── 第一段：寫入 B11:J11（數值欄，一次寫完）────────────────
         sheets.values().batchUpdate(
             spreadsheetId=SHEET_ID,
-            body={"valueInputOption": "USER_ENTERED", "data": write_data},
+            body={
+                "valueInputOption": "USER_ENTERED",
+                "data": [
+                    {"range": f"{SHEET_TAB}!B11", "values": [[body.get("B11", "")]]},
+                    {"range": f"{SHEET_TAB}!C11", "values": [[body.get("C11", "")]]},
+                    {"range": f"{SHEET_TAB}!D11", "values": [[body.get("D11", "")]]},
+                    {"range": f"{SHEET_TAB}!E11", "values": [[body.get("E11", "")]]},
+                    {"range": f"{SHEET_TAB}!F11", "values": [[body.get("F11", "")]]},
+                    {"range": f"{SHEET_TAB}!G11", "values": [[body.get("G11", "")]]},
+                    {"range": f"{SHEET_TAB}!H11", "values": [[body.get("H11", "")]]},
+                    {"range": f"{SHEET_TAB}!I11", "values": [[body.get("I11", "")]]},
+                    {"range": f"{SHEET_TAB}!J11", "values": [[body.get("J11", 250)]]},
+                ]
+            }
         ).execute()
+
+        # ── 第二段：逐一寫入 C14:C20（Data Validation 儲存格）────────
+        # 用 RAW 模式避免觸發格式驗證錯誤
+        for cell, key in [("C14","C14"),("C15","C15"),("C16","C16"),
+                           ("C17","C17"),("C18","C18"),("C19","C19"),("C20","C20")]:
+            val = body.get(key, "")
+            if val == "" or val is None:
+                continue  # 空值跳過，不覆蓋原有選項
+            try:
+                sheets.values().update(
+                    spreadsheetId=SHEET_ID,
+                    range=f"{SHEET_TAB}!{cell}",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [[val]]}
+                ).execute()
+            except Exception as cell_err:
+                print(f"[Sheet] {cell} write failed: {cell_err}")
+                # 單格失敗不中斷，繼續寫下一格
 
         time.sleep(1.5)
 
+        # ── 讀回 C27, C28 ─────────────────────────────────────────────
         result = sheets.values().batchGet(
             spreadsheetId=SHEET_ID,
             ranges=[f"{SHEET_TAB}!C27", f"{SHEET_TAB}!C28"],
