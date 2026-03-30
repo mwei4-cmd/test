@@ -17,11 +17,173 @@ try:
 except ImportError:
     JS_ROUND = 1
 
+import os, json, time
+from starlette.middleware.sessions import SessionMiddleware
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "")
+SHEET_TAB = "Input"  # 分頁名稱（工作表標籤）
+
 app = FastAPI()
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.environ.get("APP_SECRET_KEY", "dev-secret-key"),
+    https_only=True,   # Render 是 HTTPS，保持 True
+    same_site="lax",
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# ─── OAuth helpers ───────────────────────────────────────────────────────────
+
+def _make_flow(request: Request) -> Flow:
+    return Flow.from_client_config(
+        {
+            "web": {
+                "client_id":     os.environ["GOOGLE_CLIENT_ID"],
+                "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
+                "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
+                "token_uri":     "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=SCOPES,
+        redirect_uri=str(request.base_url).rstrip("/") + "/oauth2callback",
+    )
+
+def _get_service(request: Request):
+    """Session에서 token을 꺼내 Sheets service 반환. 없으면 None."""
+    tok = request.session.get("gtoken")
+    if not tok:
+        return None
+    creds = Credentials(
+        token=tok["token"],
+        refresh_token=tok.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ["GOOGLE_CLIENT_ID"],
+        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+        scopes=SCOPES,
+    )
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+# ─── OAuth routes ─────────────────────────────────────────────────────────────
+
+@app.get("/auth/login")
+async def auth_login(request: Request):
+    flow = _make_flow(request)
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+        include_granted_scopes="true",
+    )
+    request.session["oauth_state"] = state
+    return RedirectResponse(auth_url)
+
+@app.get("/oauth2callback")
+async def oauth2callback(request: Request):
+    flow = _make_flow(request)
+    flow.fetch_token(authorization_response=str(request.url))
+    creds = flow.credentials
+    request.session["gtoken"] = {
+        "token":         creds.token,
+        "refresh_token": creds.refresh_token,
+    }
+    return RedirectResponse("/")
+
+@app.get("/auth/status")
+async def auth_status(request: Request):
+    return {"logged_in": bool(request.session.get("gtoken"))}
+
+@app.get("/auth/logout")
+async def auth_logout(request: Request):
+    request.session.pop("gtoken", None)
+    return {"ok": True}
+
+# ─── Sheet routes ─────────────────────────────────────────────────────────────
+
+@app.get("/sheet/dropdown_options")
+async def sheet_dropdown_options(request: Request):
+    svc = _get_service(request)
+    if not svc:
+        return JSONResponse({"error": "not_logged_in"}, status_code=401)
+    try:
+        result = svc.spreadsheets().get(
+            spreadsheetId=SHEET_ID,
+            ranges=[f"{SHEET_TAB}!C14:C20"],
+            includeGridData=True,
+        ).execute()
+
+        rows = (result["sheets"][0]["data"][0].get("rowData") or [])
+        options_per_row = []
+        for row in rows:
+            cell = (row.get("values") or [{}])[0]
+            dv   = cell.get("dataValidation", {})
+            vals = [v["userEnteredValue"] for v in dv.get("condition", {}).get("values", [])]
+            options_per_row.append(vals)
+
+        # 補齊到 7 列（避免 Sheet 空白列造成 index 錯誤）
+        while len(options_per_row) < 7:
+            options_per_row.append([])
+
+        return {"options": options_per_row}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/sheet/calculate")
+async def sheet_calculate(request: Request):
+    svc = _get_service(request)
+    if not svc:
+        return JSONResponse({"error": "not_logged_in"}, status_code=401)
+
+    body = await request.json()
+
+    try:
+        sheets = svc.spreadsheets()
+
+        write_data = [
+            {"range": f"{SHEET_TAB}!B11", "values": [[body.get("B11", "")]]},
+            {"range": f"{SHEET_TAB}!C11", "values": [[body.get("C11", "")]]},
+            {"range": f"{SHEET_TAB}!D11", "values": [[body.get("D11", "")]]},
+            {"range": f"{SHEET_TAB}!E11", "values": [[body.get("E11", "")]]},
+            {"range": f"{SHEET_TAB}!F11", "values": [[body.get("F11", "")]]},
+            {"range": f"{SHEET_TAB}!G11", "values": [[body.get("G11", "")]]},
+            {"range": f"{SHEET_TAB}!H11", "values": [[body.get("H11", "")]]},
+            {"range": f"{SHEET_TAB}!I11", "values": [[body.get("I11", "")]]},
+            {"range": f"{SHEET_TAB}!J11", "values": [[body.get("J11", 250)]]},
+            {"range": f"{SHEET_TAB}!C14", "values": [[body.get("C14", "")]]},
+            {"range": f"{SHEET_TAB}!C15", "values": [[body.get("C15", "")]]},
+            {"range": f"{SHEET_TAB}!C16", "values": [[body.get("C16", "")]]},
+            {"range": f"{SHEET_TAB}!C17", "values": [[body.get("C17", "")]]},
+            {"range": f"{SHEET_TAB}!C18", "values": [[body.get("C18", "")]]},
+            {"range": f"{SHEET_TAB}!C19", "values": [[body.get("C19", "")]]},
+            {"range": f"{SHEET_TAB}!C20", "values": [[body.get("C20", "")]]},
+        ]
+
+        sheets.values().batchUpdate(
+            spreadsheetId=SHEET_ID,
+            body={"valueInputOption": "USER_ENTERED", "data": write_data},
+        ).execute()
+
+        time.sleep(1.5)  # 等 Sheet 重算
+
+        result = sheets.values().batchGet(
+            spreadsheetId=SHEET_ID,
+            ranges=[f"{SHEET_TAB}!C27", f"{SHEET_TAB}!C28"],
+        ).execute()
+
+        vr  = result.get("valueRanges", [])
+        c27 = vr[0]["values"][0][0] if vr[0].get("values") else ""
+        c28 = vr[1]["values"][0][0] if vr[1].get("values") else ""
+
+        return {"C27": c27, "C28": c28}
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+        
 # ── In-memory session store (single-user; extend with session IDs for multi-user) ──
 SESSION = {
     "raw_poly": None, "geo_block_name": None, "doc_out": None,
