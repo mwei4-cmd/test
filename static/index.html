@@ -580,7 +580,7 @@ canvas{display:block;width:100%;height:100%}
   <!-- Content -->
   <div id="content">
 
-    <!-- Nest panel -->
+  <!-- Nest panel -->
     <div id="panel-nest" class="panel active">
       <div id="nest-infobar" style="display:none">
 
@@ -648,7 +648,143 @@ canvas{display:block;width:100%;height:100%}
         </div>
 
       </div>
-      <div id="nest-canvas-wrap"><canvas id="nest-canvas"></canvas></div>
+
+      <!-- ── Sheet Calculator Bar ─────────────────────────────── -->
+      <div id="sh-bar" style="
+        display:none;
+        flex-shrink:0;
+        background:var(--bg2);
+        border-bottom:1px solid var(--border);
+        padding:10px 20px;
+        gap:12px;
+        align-items:center;
+        flex-wrap:wrap;
+      ">
+        <!-- 登入狀態 -->
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+          <span style="font-size:10px;letter-spacing:.1em;color:var(--text3);font-family:var(--mono);text-transform:uppercase;">◈ Sheet</span>
+          <span id="sh-auth-label" style="font-size:11px;color:var(--text3);font-family:var(--mono);">未登入</span>
+          <button id="sh-auth-btn" onclick="sheetLogin()" style="
+            font-size:11px;padding:3px 10px;border-radius:3px;
+            background:var(--bg3);border:1px solid var(--border2);
+            color:var(--text2);cursor:pointer;font-family:var(--mono);
+          ">Login</button>
+        </div>
+
+        <div id="sh-inputs" style="display:none;align-items:center;gap:8px;flex:1;flex-wrap:wrap;">
+
+          <!-- 自動帶入欄位（唯讀）-->
+          <div style="display:flex;align-items:center;gap:4px;">
+            <span style="font-size:10px;color:var(--text3);font-family:var(--mono);white-space:nowrap;">L</span>
+            <input id="sh-B11" type="number" readonly tabindex="-1" style="
+              width:70px;background:var(--bg);border:1px solid var(--border);
+              border-radius:3px;color:var(--text3);padding:4px 6px;
+              font-size:12px;font-family:var(--mono);" placeholder="—">
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <span style="font-size:10px;color:var(--text3);font-family:var(--mono);white-space:nowrap;">W</span>
+            <input id="sh-C11" type="number" readonly tabindex="-1" style="
+              width:70px;background:var(--bg);border:1px solid var(--border);
+              border-radius:3px;color:var(--text3);padding:4px 6px;
+              font-size:12px;font-family:var(--mono);" placeholder="—">
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <span style="font-size:10px;color:var(--text3);font-family:var(--mono);white-space:nowrap;">Col</span>
+            <input id="sh-D11" type="number" readonly tabindex="-1" style="
+              width:50px;background:var(--bg);border:1px solid var(--border);
+              border-radius:3px;color:var(--text3);padding:4px 6px;
+              font-size:12px;font-family:var(--mono);" placeholder="—">
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <span style="font-size:10px;color:var(--text3);font-family:var(--mono);white-space:nowrap;">Row</span>
+            <input id="sh-E11" type="number" readonly tabindex="-1" style="
+              width:50px;background:var(--bg);border:1px solid var(--border);
+              border-radius:3px;color:var(--text3);padding:4px 6px;
+              font-size:12px;font-family:var(--mono);" placeholder="—">
+          </div>
+
+          <div style="width:1px;height:24px;background:var(--border);flex-shrink:0;"></div>
+
+          <!-- 手動填入欄位 -->
+          <div style="display:flex;align-items:center;gap:4px;">
+            <span style="font-size:10px;color:var(--text2);font-family:var(--mono);white-space:nowrap;">BandL</span>
+            <input id="sh-F11" type="number" style="
+              width:60px;background:var(--bg3);border:1px solid var(--border2);
+              border-radius:3px;color:var(--text);padding:4px 6px;
+              font-size:12px;font-family:var(--mono);" placeholder="mm">
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <span style="font-size:10px;color:var(--text2);font-family:var(--mono);white-space:nowrap;">BandW</span>
+            <input id="sh-G11" type="number" style="
+              width:60px;background:var(--bg3);border:1px solid var(--border2);
+              border-radius:3px;color:var(--text);padding:4px 6px;
+              font-size:12px;font-family:var(--mono);" placeholder="mm">
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <span style="font-size:10px;color:var(--text2);font-family:var(--mono);white-space:nowrap;">GapL</span>
+            <input id="sh-H11" type="number" style="
+              width:60px;background:var(--bg3);border:1px solid var(--border2);
+              border-radius:3px;color:var(--text);padding:4px 6px;
+              font-size:12px;font-family:var(--mono);" placeholder="mm">
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <span style="font-size:10px;color:var(--text2);font-family:var(--mono);white-space:nowrap;">GapW</span>
+            <input id="sh-I11" type="number" style="
+              width:60px;background:var(--bg3);border:1px solid var(--border2);
+              border-radius:3px;color:var(--text);padding:4px 6px;
+              font-size:12px;font-family:var(--mono);" placeholder="mm">
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <span style="font-size:10px;color:var(--text2);font-family:var(--mono);white-space:nowrap;">Def</span>
+            <input id="sh-J11" type="number" value="250" style="
+              width:60px;background:var(--bg3);border:1px solid var(--border2);
+              border-radius:3px;color:var(--text);padding:4px 6px;
+              font-size:12px;font-family:var(--mono);">
+          </div>
+
+          <div style="width:1px;height:24px;background:var(--border);flex-shrink:0;"></div>
+
+          <!-- C14:C20 Dropdowns -->
+          <div id="sh-dropdowns" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
+            <span style="font-size:10px;color:var(--text3);font-family:var(--mono);">載入中…</span>
+          </div>
+
+          <div style="width:1px;height:24px;background:var(--border);flex-shrink:0;"></div>
+
+          <!-- 送出 + 結果 -->
+          <button onclick="sheetCalculate()" style="
+            padding:5px 14px;border-radius:3px;
+            border:1px solid var(--accent);
+            background:transparent;color:var(--accent);
+            font-size:12px;font-family:var(--mono);
+            cursor:pointer;letter-spacing:.06em;white-space:nowrap;
+            transition:all .15s;flex-shrink:0;
+          " onmouseover="this.style.background='var(--accent)';this.style.color='#000'"
+             onmouseout="this.style.background='transparent';this.style.color='var(--accent)'">
+            ▶ Calc
+          </button>
+          <span id="sh-status" style="font-size:11px;color:var(--text3);font-family:var(--mono);white-space:nowrap;"></span>
+
+          <!-- 結果數值 -->
+          <div id="sh-result" style="display:none;align-items:center;gap:12px;flex-shrink:0;">
+            <div style="width:1px;height:24px;background:var(--border);"></div>
+            <div>
+              <span style="font-size:10px;color:var(--text3);font-family:var(--mono);">C27&nbsp;</span>
+              <span id="sh-c27" style="font-size:15px;font-weight:600;color:var(--accent);font-family:var(--mono);">—</span>
+            </div>
+            <div>
+              <span style="font-size:10px;color:var(--text3);font-family:var(--mono);">C28&nbsp;</span>
+              <span id="sh-c28" style="font-size:15px;font-weight:600;color:var(--accent);font-family:var(--mono);">—</span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+      <!-- ── /Sheet Calculator Bar ── -->
+
+      <div id="nest-canvas-wrap" style="flex:1;overflow:hidden;position:relative;background:#000;min-height:0;">
+        <canvas id="nest-canvas"></canvas>
+      </div>
     </div>
 
     <!-- Bridge panel -->
@@ -807,6 +943,9 @@ async function runNesting(){
         nestState.compW=d.compressed_w;
         nestState.compH=d.compressed_h;
         nestZoomReset(); nestDrawAll();
+        // 在 msg.type === 'done' 的處理末尾加：
+        nestState.stats = d.stats;   // 先存起來
+        sheetAutoFill();             // 自動帶入
         if(d.top3&&d.top3.length){
           // delay so flex gives #c3-0 its rendered size before drawing
           setTimeout(()=>drawBestPair(d.top3[0]), 50);
@@ -1233,6 +1372,129 @@ function downloadBridge(){window.location='/download_bridge_dxf';}
 function showLoading(msg){document.getElementById('loading-msg').textContent=msg;document.getElementById('loading').classList.add('show');}
 function hideLoading(){document.getElementById('loading').classList.remove('show');}
 
+<script>
+// ════════════════════════════════
+//  Sheet Calculator
+// ════════════════════════════════
+const SH_CELLS = ['C14','C15','C16','C17','C18','C19','C20'];
+
+async function sheetInit() {
+  try {
+    const { logged_in } = await fetch('/auth/status').then(r => r.json());
+    if (logged_in) {
+      _shLoggedIn();
+      sheetLoadDropdowns();
+    }
+  } catch(e) {}
+  // 無論登入與否，都顯示 bar
+  document.getElementById('sh-bar').style.display = 'flex';
+}
+
+function _shLoggedIn() {
+  document.getElementById('sh-auth-label').textContent = '已登入';
+  document.getElementById('sh-auth-label').style.color = 'var(--accent)';
+  document.getElementById('sh-auth-btn').textContent = 'Logout';
+  document.getElementById('sh-auth-btn').onclick = sheetLogout;
+  document.getElementById('sh-inputs').style.display = 'flex';
+}
+
+function sheetLogin()  { window.location.href = '/auth/login'; }
+async function sheetLogout() {
+  await fetch('/auth/logout');
+  location.reload();
+}
+
+// 自動帶入排版結果（在 done SSE 處理完後呼叫）
+function sheetAutoFill() {
+  const s = nestState.stats;
+  if (!s) return;
+  const set = (id, val) => {
+    if (val != null) document.getElementById(id).value = +val;
+  };
+  // ↓ 把 key 名稱對應到你 stats 裡實際的欄位
+  set('sh-B11', s.pcb_w  ?? s.p_w);
+  set('sh-C11', s.pcb_h  ?? s.p_h);
+  set('sh-D11', s.cols);
+  set('sh-E11', s.rows);
+}
+
+async function sheetLoadDropdowns() {
+  const box = document.getElementById('sh-dropdowns');
+  try {
+    const res = await fetch('/sheet/dropdown_options');
+    if (res.status === 401) { box.innerHTML = ''; return; }
+    const { options, error } = await res.json();
+    if (error) {
+      box.innerHTML = `<span style="color:#f55;font-size:10px;">${error}</span>`;
+      return;
+    }
+    box.innerHTML = '';
+    SH_CELLS.forEach((cell, i) => {
+      const opts = options[i] || [];
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;align-items:center;gap:3px;';
+      wrap.innerHTML = `
+        <span style="font-size:10px;color:var(--text3);font-family:var(--mono);white-space:nowrap;">${cell}</span>
+        <select id="sh-${cell}" style="
+          background:var(--bg3);border:1px solid var(--border2);
+          border-radius:3px;color:var(--text);padding:3px 5px;
+          font-size:11px;font-family:var(--mono);">
+          <option value="">—</option>
+          ${opts.map(o => `<option value="${o}">${o}</option>`).join('')}
+        </select>`;
+      box.appendChild(wrap);
+    });
+  } catch(e) {
+    box.innerHTML = `<span style="color:#f55;font-size:10px;">讀取失敗</span>`;
+  }
+}
+
+async function sheetCalculate() {
+  const status = document.getElementById('sh-status');
+  const result = document.getElementById('sh-result');
+
+  const payload = {};
+  ['B11','C11','D11','E11','F11','G11','H11','I11','J11'].forEach(k => {
+    const el = document.getElementById(`sh-${k}`);
+    const v = parseFloat(el?.value);
+    payload[k] = isNaN(v) ? '' : v;
+  });
+  SH_CELLS.forEach(k => {
+    payload[k] = document.getElementById(`sh-${k}`)?.value ?? '';
+  });
+
+  status.textContent = 'writing…';
+  status.style.color = 'var(--text3)';
+  result.style.display = 'none';
+
+  try {
+    const res = await fetch('/sheet/calculate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.status === 401) {
+      status.textContent = 'not logged in';
+      status.style.color = '#f55';
+      return;
+    }
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    document.getElementById('sh-c27').textContent = data.C27 || '—';
+    document.getElementById('sh-c28').textContent = data.C28 || '—';
+    result.style.display = 'flex';
+    status.textContent = '✓';
+    status.style.color = 'var(--accent)';
+  } catch(e) {
+    status.textContent = e.message;
+    status.style.color = '#f55';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', sheetInit);
+</script>
+  
 // Init
 nestZoomReset();
 </script>
