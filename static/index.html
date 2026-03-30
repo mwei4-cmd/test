@@ -662,13 +662,7 @@ canvas{display:block;width:100%;height:100%}
       ">
         <!-- 登入狀態 -->
         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
-          <span style="font-size:10px;letter-spacing:.1em;color:var(--text3);font-family:var(--mono);text-transform:uppercase;">◈ Sheet</span>
-          <span id="sh-auth-label" style="font-size:11px;color:var(--text3);font-family:var(--mono);">未登入</span>
-          <button id="sh-auth-btn" onclick="sheetLogin()" style="
-            font-size:11px;padding:3px 10px;border-radius:3px;
-            background:var(--bg3);border:1px solid var(--border2);
-            color:var(--text2);cursor:pointer;font-family:var(--mono);
-          ">Login</button>
+          <span style="font-size:10px;letter-spacing:.1em;color:var(--accent);font-family:var(--mono);">◈ Sheet</span>
         </div>
 
         <div id="sh-inputs" style="display:none;align-items:center;gap:8px;flex:1;flex-wrap:wrap;">
@@ -1262,13 +1256,12 @@ async function sheetInit() {
   try {
     const { logged_in } = await fetch('/auth/status').then(r => r.json());
     if (logged_in) {
-      _shLoggedIn();
+      document.getElementById('sh-inputs').style.display = 'flex';
       sheetLoadDropdowns();
     }
   } catch(e) {}
   document.getElementById('sh-bar').style.display = 'flex';
 }
-
 function _shLoggedIn() {
   document.getElementById('sh-auth-label').textContent = '已登入';
   document.getElementById('sh-auth-label').style.color = 'var(--accent)';
