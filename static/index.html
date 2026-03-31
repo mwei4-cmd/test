@@ -763,11 +763,11 @@ canvas{display:block;width:100%;height:100%}
           <div id="sh-result" style="display:none;align-items:center;gap:12px;flex-shrink:0;">
             <div style="width:1px;height:24px;background:var(--border);"></div>
             <div>
-              <span style="font-size:10px;color:var(--text3);font-family:var(--mono);">C27&nbsp;</span>
+              <span style="font-size:10px;color:var(--text3);font-family:var(--mono);">Panel Utilization&nbsp;</span>
               <span id="sh-c27" style="font-size:15px;font-weight:600;color:var(--accent);font-family:var(--mono);">—</span>
             </div>
             <div>
-              <span style="font-size:10px;color:var(--text3);font-family:var(--mono);">C28&nbsp;</span>
+              <span style="font-size:10px;color:var(--text3);font-family:var(--mono);">PCS Utilization&nbsp;</span>
               <span id="sh-c28" style="font-size:15px;font-weight:600;color:var(--accent);font-family:var(--mono);">—</span>
             </div>
           </div>
@@ -1283,6 +1283,16 @@ function sheetAutoFill() {
   set('sh-E11', s.rows);
 }
 
+const SH_LABELS = {
+  C14: 'Category',
+  C15: 'Layer count',
+  C16: 'CCL type',
+  C17: 'Thickness',
+  C18: '90D rotation',
+  C19: 'Outline shearing',
+  C20: 'Irregular nesting',
+};
+
 async function sheetLoadDropdowns() {
   const box = document.getElementById('sh-dropdowns');
   try {
@@ -1296,7 +1306,7 @@ async function sheetLoadDropdowns() {
       const wrap = document.createElement('div');
       wrap.style.cssText = 'display:flex;align-items:center;gap:3px;';
       wrap.innerHTML = `
-        <span style="font-size:10px;color:var(--text3);font-family:var(--mono);white-space:nowrap;">${cell}</span>
+        <span style="font-size:10px;color:var(--text3);font-family:var(--mono);white-space:nowrap;">${SH_LABELS[cell] ?? cell}</span>
         <select id="sh-${cell}" style="background:var(--bg3);border:1px solid var(--border2);
           border-radius:3px;color:var(--text);padding:3px 5px;font-size:11px;font-family:var(--mono);">
           <option value="">—</option>
@@ -1308,7 +1318,6 @@ async function sheetLoadDropdowns() {
     box.innerHTML = `<span style="color:#f55;font-size:10px;">讀取失敗</span>`;
   }
 }
-
 async function sheetCalculate() {
   const status = document.getElementById('sh-status');
   const result = document.getElementById('sh-result');
