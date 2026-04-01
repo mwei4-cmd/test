@@ -454,24 +454,58 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
             else: g.append([c])
         return g
 
-    def min_gap(polys, axis):
-        if len(polys) < 2: return 0.0
-        min_g = float('inf')
-        if axis == 'x':
-            sp = sorted(polys, key=lambda p: p.bounds[0])
-            for i in range(len(sp)):
-                for j in range(i+1, len(sp)):
-                    g = sp[j].bounds[0] - sp[i].bounds[2]
-                    if g < min_g: min_g = g
-                    if g > min_g + 50: break
+    def compute_gaps(fp, mode, bsw, bsh):
+        if len(fp) < 2:
+            return 0.0, 0.0, None
+
+        anchor = min(fp, key=lambda p: (round(p.bounds[0], 1), round(p.bounds[1], 1)))
+        ax1, ay1, ax2, ay2 = anchor.bounds
+        acx, acy = anchor.centroid.x, anchor.centroid.y
+
+        if "Nesting" in mode:
+            others = [p for p in fp if p is not anchor]
+            if not others:
+                return 0.0, 0.0, None
+
+            # 同格 B 零件：centroid 最近的
+            nearest = min(others, key=lambda p:
+                (p.centroid.x - acx)**2 + (p.centroid.y - acy)**2)
+            nest_gap = round(anchor.distance(nearest), 3)
+
+            # gap_x：A 到右邊下一格的 bbox 間距
+            right_candidates = [p for p in fp if p is not anchor and p is not nearest
+                                and abs(p.centroid.y - acy) < bsh * 0.5
+                                and p.centroid.x > ax2]
+            gap_x = round(min(right_candidates, key=lambda p: p.centroid.x).bounds[0] - ax2, 3) \
+                    if right_candidates else nest_gap
+
+            # gap_y：A 到上面下一格的 bbox 間距
+            up_candidates = [p for p in fp if p is not anchor and p is not nearest
+                            and abs(p.centroid.x - acx) < bsw * 0.5
+                            and p.centroid.y > ay2]
+            gap_y = round(min(up_candidates, key=lambda p: p.centroid.y).bounds[1] - ay2, 3) \
+                    if up_candidates else nest_gap
+
+            return gap_x, gap_y, nest_gap
+
         else:
-            sp = sorted(polys, key=lambda p: p.bounds[1])
-            for i in range(len(sp)):
-                for j in range(i+1, len(sp)):
-                    g = sp[j].bounds[1] - sp[i].bounds[3]
-                    if g < min_g: min_g = g
-                    if g > min_g + 50: break
-        return round(min_g, 4) if min_g != float('inf') else 0.0
+            # Matrix / V-Cut：左下角到右邊/上面相鄰零件的 bbox 間距
+            right_candidates = [p for p in fp if p is not anchor
+                               and abs(p.centroid.y - acy) < bsh * 0.5
+                               and p.centroid.x > ax2]
+            gap_x = round(min(right_candidates, key=lambda p: p.centroid.x).bounds[0] - ax2, 3) \
+                    if right_candidates else 0.0
+
+            up_candidates = [p for p in fp if p is not anchor
+                            and abs(p.centroid.x - acx) < bsw * 0.5
+                            and p.centroid.y > ay2]
+            gap_y = round(min(up_candidates, key=lambda p: p.centroid.y).bounds[1] - ay2, 3) \
+                    if up_candidates else 0.0
+
+            return gap_x, gap_y, None
+
+    mode = params.get("mode", "")
+    gap_x, gap_y, nest_gap = compute_gaps(fp, mode, bsw, bsh)
 
     xg = get_groups([p.centroid.x for p in fp])
     yg = get_groups([p.centroid.y for p in fp])
@@ -481,7 +515,7 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
         "pcs": len(fp), "p_w": round(p_w,3), "p_h": round(p_h,3),
         "utilization": round(sum(p.area for p in fp)/(compw*comph)*100, 2),
         "cols": len(xg), "rows": len(yg),
-        "gap_x": min_gap(fp,'x'), "gap_y": min_gap(fp,'y'),
+        "gap_x": gap_x, "gap_y": gap_y,
         "band_l": round(fu2[0],2), "band_r": round(compw-fu2[2],2),
         "band_b": round(fu2[1],2), "band_t": round(comph-fu2[3],2),
         "original_w": round(cw,3), "original_h": round(ch,3),
@@ -489,6 +523,8 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
         "shrink_w": round(cw-compw,3), "shrink_h": round(ch-comph,3),
         "cur_cols": bcc, "cur_rows": bcr,
     }
+    if nest_gap is not None:
+        stats["nest_gap"] = nest_gap
     if bsw > 0 and bsh > 0:
         sew = (bcc+1)*bsw + bsw*0.01
         seh = (bcr+1)*bsh + bsh*0.01
