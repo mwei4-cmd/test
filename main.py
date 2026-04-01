@@ -412,6 +412,38 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
 
     return lines
 
+def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
+    if not fp:
+        return 0.0, 0.0, None
+
+    p_w = raw_poly.bounds[2] - raw_poly.bounds[0]
+    p_h = raw_poly.bounds[3] - raw_poly.bounds[1]
+
+    if "Nesting" in mode:
+        cell_w = bsw - spacing
+        cell_h = bsh - spacing
+        gap_x = round(bsw - cell_w, 3)
+        gap_y = round(bsh - cell_h, 3)
+        nest_gap = None
+        if len(fp) >= 2:
+            anchor = min(fp, key=lambda p: (round(p.bounds[0],1), round(p.bounds[1],1)))
+            acx, acy = anchor.centroid.x, anchor.centroid.y
+            others = [p for p in fp if p is not anchor]
+            if others:
+                nearest = min(others, key=lambda p:
+                    (p.centroid.x-acx)**2 + (p.centroid.y-acy)**2)
+                nest_gap = round(anchor.distance(nearest), 3)
+        return gap_x, gap_y, nest_gap
+
+    elif "V-Cut" in mode:
+        return 0.0, 0.0, None
+
+    else:  # Matrix
+        gap_x = round(bsw - p_w, 3)
+        gap_y = round(bsh - p_h, 3)
+        return gap_x, gap_y, None
+
+
 def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, doc_out, raw_poly):
     cw, ch = params["panel_w"], params["panel_h"]
     lb, rb, ub, db = params["left"], params["right"], params["top"], params["bottom"]
@@ -454,54 +486,7 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
             else: g.append([c])
         return g
 
-    def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
-    """
-    Gap = step - part_bbox_size，數學固定值，不受排列數影響。
-    - Matrix:  step = part_size + spacing，所以 gap = spacing
-    - V-Cut:   step = part_size，所以 gap = 0
-    - Nesting: step 包含兩個嵌合零件的 combined bbox + spacing
-               gap_x/y = 格間距（step - combined_bbox）
-               nest_gap = A/B 零件實際 shapely distance（= spacing 設定值）
-    """
-    if not fp:
-        return 0.0, 0.0, None
-
-    p_w = raw_poly.bounds[2] - raw_poly.bounds[0]
-    p_h = raw_poly.bounds[3] - raw_poly.bounds[1]
-
-    if "Nesting" in mode:
-        # combined bbox of one step cell
-        cell_w = bsw - spacing  # bsw = combined_bbox_w + spacing
-        cell_h = bsh - spacing
-        # gap between cells = step - part_size（單個零件）
-        # 但 Nesting 一格有兩個零件，cell bbox 已包含兩個
-        # 格間 bbox gap
-        gap_x = round(bsw - cell_w, 3)   # = spacing
-        gap_y = round(bsh - cell_h, 3)   # = spacing
-        # A/B 實際距離：從第一格的兩個零件算一次就夠
-        nest_gap = None
-        if len(fp) >= 2:
-            # 找左下角的兩個零件（同格 A+B）
-            anchor = min(fp, key=lambda p: (round(p.bounds[0],1), round(p.bounds[1],1)))
-            acx, acy = anchor.centroid.x, anchor.centroid.y
-            # 同格 B：centroid 距離最近的那個
-            others = [p for p in fp if p is not anchor]
-            if others:
-                nearest = min(others, key=lambda p:
-                    (p.centroid.x-acx)**2 + (p.centroid.y-acy)**2)
-                nest_gap = round(anchor.distance(nearest), 3)
-        return gap_x, gap_y, nest_gap
-
-    elif "V-Cut" in mode:
-        return 0.0, 0.0, None
-
-    else:  # Matrix
-        gap_x = round(bsw - p_w, 3)
-        gap_y = round(bsh - p_h, 3)
-        return gap_x, gap_y, None
-
     mode = params.get("mode", "")
-    spacing = params.get("spacing", 2)
     gap_x, gap_y, nest_gap = compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing)
     xg = get_groups([p.centroid.x for p in fp])
     yg = get_groups([p.centroid.y for p in fp])
@@ -538,7 +523,6 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
         polys_data.append({"exterior": ext, "holes": holes, "ax": ax, "ay": ay, "ang": ang})
 
     return fps, stats, polys_data, compw, comph
-
 def calculate_bridge(data, lines, connectors):
     gap_half = 1.75
     l1 = lines[data['idx1']]
