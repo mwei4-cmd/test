@@ -1281,10 +1281,22 @@ function sheetAutoFill() {
   const s = nestState.stats;
   if (!s) return;
   const set = (id, val) => { if (val != null) document.getElementById(id).value = +val; };
+
+  // 自動帶入排版結果
   set('sh-B11', s.p_w);
   set('sh-C11', s.p_h);
   set('sh-D11', s.cols);
   set('sh-E11', s.rows);
+
+  // Gap：bbox X → GapW(H11)，bbox Y → GapL(I11)
+  set('sh-H11', s.gap_x);
+  set('sh-I11', s.gap_y);
+
+  // Band：左側 sidebar 輸入值
+  const bandLeft = parseFloat(document.getElementById('ml').value);
+  const bandTop  = parseFloat(document.getElementById('mt').value);
+  if (!isNaN(bandLeft)) document.getElementById('sh-G11').value = bandLeft;  // BandW
+  if (!isNaN(bandTop))  document.getElementById('sh-F11').value = bandTop;   // BandL
 }
 
 const SH_LABELS = {
