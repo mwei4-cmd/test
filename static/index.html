@@ -607,6 +607,11 @@ canvas{display:block;width:100%;height:100%}
                     <button class="adj-btn" onclick="adjustLayout(0,1)" title="+1 row">+R</button>
                     <button class="adj-btn" onclick="adjustLayout(0,-1)" title="-1 row">−R</button>
                   </div>
+                  <!-- 建議尺寸標註 -->
+                  <div style="display:flex;flex-direction:column;gap:3px;margin-left:8px;">
+                    <span id="si-sug-col-inline" style="font-size:10px;color:var(--accent);font-family:var(--mono);white-space:nowrap;line-height:1.7;">+1 Col —</span>
+                    <span id="si-sug-row-inline" style="font-size:10px;color:var(--accent);font-family:var(--mono);white-space:nowrap;line-height:1.7;">+1 Row —</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -614,7 +619,7 @@ canvas{display:block;width:100%;height:100%}
 
           <div class="info-hline"></div>
 
-          <!-- Row 2: Panel sizes aligned with Suggest below -->
+          <!-- Row 2: Panel sizes -->
           <div class="info-size-row">
             <div class="size-col">
               <div class="size-entry">
@@ -623,18 +628,7 @@ canvas{display:block;width:100%;height:100%}
               </div>
               <div class="size-entry">
                 <span class="stat-label">Compressed</span>
-                <span class="stat-val" id="si-panel">—</span>
-              </div>
-            </div>
-            <div class="stat-vline"></div>
-            <div class="size-col" id="si-suggest" style="visibility:hidden">
-              <div class="size-entry">
-                <span class="stat-label">+1 Col</span>
-                <span class="stat-val sug-val" id="si-sug-col">—</span>
-              </div>
-              <div class="size-entry">
-                <span class="stat-label">+1 Row</span>
-                <span class="stat-val sug-val" id="si-sug-row">—</span>
+                <span class="stat-val" id="si-panel" style="color:var(--accent);">—</span>
               </div>
             </div>
           </div>
@@ -1074,11 +1068,17 @@ async function adjustLayout(dcol, drow){
 }
 
 function renderSuggest(s){
-  const el=document.getElementById('si-suggest');
-  if(!s.suggest_w){el.style.visibility='hidden';return;}
-  el.style.visibility='visible';
-  document.getElementById('si-sug-col').textContent= 'W ≥ '+s.suggest_w+' mm';
-  document.getElementById('si-sug-row').textContent= 'H ≥ '+s.suggest_h+' mm';
+  // 更新按鈕旁的建議尺寸（用已壓縮後的實際數據）
+  const colEl = document.getElementById('si-sug-col-inline');
+  const rowEl = document.getElementById('si-sug-row-inline');
+  if(!colEl || !rowEl) return;
+  if(s.suggest_w){
+    colEl.textContent = '+1 Col  W ≥ ' + s.suggest_w + ' mm';
+    rowEl.textContent = '+1 Row  H ≥ ' + s.suggest_h + ' mm';
+  } else {
+    colEl.textContent = '+1 Col —';
+    rowEl.textContent = '+1 Row —';
+  }
 }
 
 function renderStatsTable(s){
