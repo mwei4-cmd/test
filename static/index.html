@@ -1086,13 +1086,17 @@ function renderStatsTable(s){
   const suggestRows = s.suggest_w ? `
     <tr><td>Min panel width (+1 col)</td><td>${s.suggest_w} mm &nbsp;<span style="color:var(--text3)">${s.suggest_cols} cols</span></td></tr>
     <tr><td>Min panel height (+1 row)</td><td>${s.suggest_h} mm &nbsp;<span style="color:var(--text3)">${s.suggest_rows} rows</span></td></tr>` : '';
+  const gapRow = s.nest_gap != null
+    ? `<tr><td>Part gap (bbox) X / Y</td><td>${s.gap_x} / ${s.gap_y} mm</td></tr>
+       <tr><td>Nesting gap (actual)</td><td>${s.nest_gap} mm</td></tr>`
+    : `<tr><td>Min part gap X / Y</td><td>${s.gap_x} / ${s.gap_y} mm</td></tr>`;
   document.getElementById('spec-table').innerHTML=`
     <tr><td>Part size</td><td>${s.p_w} × ${s.p_h} mm</td></tr>
     <tr><td>Total count</td><td>${s.pcs} pcs</td></tr>
     <tr><td>Space utilization</td><td>${s.utilization}%</td></tr>
+    ${gapRow}
     <tr><td>Compressed panel</td><td>${s.compressed_w} × ${s.compressed_h} mm</td></tr>
     <tr><td>Reduction vs. original</td><td>−${s.shrink_w} × −${s.shrink_h} mm</td></tr>
-    <tr><td>Min part gap X / Y</td><td>${s.gap_x} / ${s.gap_y} mm</td></tr>
     <tr><td>Edge margin L / R</td><td>${s.band_l} / ${s.band_r} mm</td></tr>
     <tr><td>Edge margin T / B</td><td>${s.band_t} / ${s.band_b} mm</td></tr>
     ${suggestRows}
