@@ -454,59 +454,55 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
             else: g.append([c])
         return g
 
-    def compute_gaps(fp, mode, bsw, bsh):
-        if len(fp) < 2:
-            return 0.0, 0.0, None
+    def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
+    """
+    Gap = step - part_bbox_size，數學固定值，不受排列數影響。
+    - Matrix:  step = part_size + spacing，所以 gap = spacing
+    - V-Cut:   step = part_size，所以 gap = 0
+    - Nesting: step 包含兩個嵌合零件的 combined bbox + spacing
+               gap_x/y = 格間距（step - combined_bbox）
+               nest_gap = A/B 零件實際 shapely distance（= spacing 設定值）
+    """
+    if not fp:
+        return 0.0, 0.0, None
 
-        anchor = min(fp, key=lambda p: (round(p.bounds[0], 1), round(p.bounds[1], 1)))
-        ax1, ay1, ax2, ay2 = anchor.bounds
-        acx, acy = anchor.centroid.x, anchor.centroid.y
+    p_w = raw_poly.bounds[2] - raw_poly.bounds[0]
+    p_h = raw_poly.bounds[3] - raw_poly.bounds[1]
 
-        if "Nesting" in mode:
+    if "Nesting" in mode:
+        # combined bbox of one step cell
+        cell_w = bsw - spacing  # bsw = combined_bbox_w + spacing
+        cell_h = bsh - spacing
+        # gap between cells = step - part_size（單個零件）
+        # 但 Nesting 一格有兩個零件，cell bbox 已包含兩個
+        # 格間 bbox gap
+        gap_x = round(bsw - cell_w, 3)   # = spacing
+        gap_y = round(bsh - cell_h, 3)   # = spacing
+        # A/B 實際距離：從第一格的兩個零件算一次就夠
+        nest_gap = None
+        if len(fp) >= 2:
+            # 找左下角的兩個零件（同格 A+B）
+            anchor = min(fp, key=lambda p: (round(p.bounds[0],1), round(p.bounds[1],1)))
+            acx, acy = anchor.centroid.x, anchor.centroid.y
+            # 同格 B：centroid 距離最近的那個
             others = [p for p in fp if p is not anchor]
-            if not others:
-                return 0.0, 0.0, None
+            if others:
+                nearest = min(others, key=lambda p:
+                    (p.centroid.x-acx)**2 + (p.centroid.y-acy)**2)
+                nest_gap = round(anchor.distance(nearest), 3)
+        return gap_x, gap_y, nest_gap
 
-            # 同格 B 零件：centroid 最近的
-            nearest = min(others, key=lambda p:
-                (p.centroid.x - acx)**2 + (p.centroid.y - acy)**2)
-            nest_gap = round(anchor.distance(nearest), 3)
+    elif "V-Cut" in mode:
+        return 0.0, 0.0, None
 
-            # gap_x：A 到右邊下一格的 bbox 間距
-            right_candidates = [p for p in fp if p is not anchor and p is not nearest
-                                and abs(p.centroid.y - acy) < bsh * 0.5
-                                and p.centroid.x > ax2]
-            gap_x = round(min(right_candidates, key=lambda p: p.centroid.x).bounds[0] - ax2, 3) \
-                    if right_candidates else nest_gap
-
-            # gap_y：A 到上面下一格的 bbox 間距
-            up_candidates = [p for p in fp if p is not anchor and p is not nearest
-                            and abs(p.centroid.x - acx) < bsw * 0.5
-                            and p.centroid.y > ay2]
-            gap_y = round(min(up_candidates, key=lambda p: p.centroid.y).bounds[1] - ay2, 3) \
-                    if up_candidates else nest_gap
-
-            return gap_x, gap_y, nest_gap
-
-        else:
-            # Matrix / V-Cut：左下角到右邊/上面相鄰零件的 bbox 間距
-            right_candidates = [p for p in fp if p is not anchor
-                               and abs(p.centroid.y - acy) < bsh * 0.5
-                               and p.centroid.x > ax2]
-            gap_x = round(min(right_candidates, key=lambda p: p.centroid.x).bounds[0] - ax2, 3) \
-                    if right_candidates else 0.0
-
-            up_candidates = [p for p in fp if p is not anchor
-                            and abs(p.centroid.x - acx) < bsw * 0.5
-                            and p.centroid.y > ay2]
-            gap_y = round(min(up_candidates, key=lambda p: p.centroid.y).bounds[1] - ay2, 3) \
-                    if up_candidates else 0.0
-
-            return gap_x, gap_y, None
+    else:  # Matrix
+        gap_x = round(bsw - p_w, 3)
+        gap_y = round(bsh - p_h, 3)
+        return gap_x, gap_y, None
 
     mode = params.get("mode", "")
-    gap_x, gap_y, nest_gap = compute_gaps(fp, mode, bsw, bsh)
-
+    spacing = params.get("spacing", 2)
+    gap_x, gap_y, nest_gap = compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing)
     xg = get_groups([p.centroid.x for p in fp])
     yg = get_groups([p.centroid.y for p in fp])
     fu2 = unary_union(fp).bounds
