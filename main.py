@@ -413,34 +413,91 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
     return lines
 
 def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
-    if not fp:
+    if len(fp) < 2:
         return 0.0, 0.0, None
 
-    p_w = raw_poly.bounds[2] - raw_poly.bounds[0]
-    p_h = raw_poly.bounds[3] - raw_poly.bounds[1]
+    # 用 bounding box 左下角排序，找最左下的零件為 anchor
+    sorted_by_pos = sorted(fp, key=lambda p: (round(p.bounds[1], 1), round(p.bounds[0], 1)))
+    anchor = sorted_by_pos[0]
+    ax1, ay1, ax2, ay2 = anchor.bounds
+    acx, acy = anchor.centroid.x, anchor.centroid.y
 
     if "Nesting" in mode:
-        cell_w = bsw - spacing
-        cell_h = bsh - spacing
-        gap_x = round(bsw - cell_w, 3)
-        gap_y = round(bsh - cell_h, 3)
-        nest_gap = None
-        if len(fp) >= 2:
-            anchor = min(fp, key=lambda p: (round(p.bounds[0],1), round(p.bounds[1],1)))
-            acx, acy = anchor.centroid.x, anchor.centroid.y
-            others = [p for p in fp if p is not anchor]
-            if others:
-                nearest = min(others, key=lambda p:
-                    (p.centroid.x-acx)**2 + (p.centroid.y-acy)**2)
-                nest_gap = round(anchor.distance(nearest), 3)
+        # 同格 B：centroid 最近的那個（排除自己）
+        others = [p for p in fp if p is not anchor]
+        nearest = min(others, key=lambda p:
+            (p.centroid.x - acx)**2 + (p.centroid.y - acy)**2)
+        nest_gap = round(anchor.distance(nearest), 3)
+
+        # 右邊相鄰格的 A：x 方向最近且 y centroid 接近 anchor 的
+        # 用 bsw 估計，找 centroid.x 在 acx + bsw*0.5 ~ acx + bsw*1.5 之間
+        right_candidates = [p for p in fp
+                           if p is not anchor
+                           and p is not nearest
+                           and p.centroid.x > ax2
+                           and abs(p.centroid.y - acy) < bsh * 0.4]
+        if right_candidates:
+            right = min(right_candidates, key=lambda p: p.centroid.x)
+            gap_x = round(right.bounds[0] - ax2, 3)
+        else:
+            gap_x = nest_gap
+
+        # 上方相鄰格的 A
+        up_candidates = [p for p in fp
+                        if p is not anchor
+                        and p is not nearest
+                        and p.centroid.y > ay2
+                        and abs(p.centroid.x - acx) < bsw * 0.4]
+        if up_candidates:
+            up = min(up_candidates, key=lambda p: p.centroid.y)
+            gap_y = round(up.bounds[1] - ay2, 3)
+        else:
+            gap_y = nest_gap
+
         return gap_x, gap_y, nest_gap
 
     elif "V-Cut" in mode:
-        return 0.0, 0.0, None
+        # 右邊相鄰
+        right_candidates = [p for p in fp
+                           if p is not anchor
+                           and p.centroid.x > ax2
+                           and abs(p.centroid.y - acy) < bsh * 0.4]
+        gap_x = 0.0
+        if right_candidates:
+            right = min(right_candidates, key=lambda p: p.centroid.x)
+            gap_x = round(right.bounds[0] - ax2, 3)
+
+        # 上方相鄰
+        up_candidates = [p for p in fp
+                        if p is not anchor
+                        and p.centroid.y > ay2
+                        and abs(p.centroid.x - acx) < bsw * 0.4]
+        gap_y = 0.0
+        if up_candidates:
+            up = min(up_candidates, key=lambda p: p.centroid.y)
+            gap_y = round(up.bounds[1] - ay2, 3)
+
+        return gap_x, gap_y, None
 
     else:  # Matrix
-        gap_x = round(bsw - p_w, 3)
-        gap_y = round(bsh - p_h, 3)
+        right_candidates = [p for p in fp
+                           if p is not anchor
+                           and p.centroid.x > ax2
+                           and abs(p.centroid.y - acy) < bsh * 0.4]
+        gap_x = 0.0
+        if right_candidates:
+            right = min(right_candidates, key=lambda p: p.centroid.x)
+            gap_x = round(right.bounds[0] - ax2, 3)
+
+        up_candidates = [p for p in fp
+                        if p is not anchor
+                        and p.centroid.y > ay2
+                        and abs(p.centroid.x - acx) < bsw * 0.4]
+        gap_y = 0.0
+        if up_candidates:
+            up = min(up_candidates, key=lambda p: p.centroid.y)
+            gap_y = round(up.bounds[1] - ay2, 3)
+
         return gap_x, gap_y, None
 
 
