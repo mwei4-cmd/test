@@ -275,7 +275,8 @@ input[type=range]{
 
 /* ── Nest info bar (1/3 panel height) ── */
 #nest-infobar{
-  flex:1;                        /* fills 1/3 because nest canvas is flex:2 */
+  flex:1;
+  max-height:180px;
   display:flex;
   flex-direction:row;
   border-bottom:1px solid var(--border);
@@ -644,7 +645,7 @@ canvas{display:block;width:100%;height:100%}
       </div>
 
       <!-- ── Sheet Calculator Bar ─────────────────────────────── -->
-      <div id="sh-bar" style="
+      <div id="sh-bar" style="...現有style...;max-height:60px;min-height:0;">
         display:none;
         flex-shrink:0;
         background:var(--bg2);
@@ -1010,22 +1011,18 @@ function nestDrawAll(){
     const dimColor  = '#00EAD0';   // accent 藍綠
     const partColor = '#888888';   // 零件標註灰色
 
-    // ── 面板寬（下方水平）──
+     // ── 面板寬（上方水平）──
     {
-      const y0 = ty(0) + pad;
+      const y0 = ty(compH) - pad;
       const x0 = tx(0), x1 = tx(compW);
       ctx.strokeStyle = dimColor; ctx.lineWidth = 1;
-      // 主線
       ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y0); ctx.stroke();
-      // 左端刻度
       ctx.beginPath(); ctx.moveTo(x0, y0-tickLen); ctx.lineTo(x0, y0+tickLen); ctx.stroke();
-      // 右端刻度
       ctx.beginPath(); ctx.moveTo(x1, y0-tickLen); ctx.lineTo(x1, y0+tickLen); ctx.stroke();
-      // 文字
       const wLabel = compW.toFixed(1) + ' mm';
       ctx.fillStyle = dimColor;
       ctx.textAlign = 'center';
-      ctx.fillText(wLabel, (x0+x1)/2, y0 + font + 3);
+      ctx.fillText(wLabel, (x0+x1)/2, y0 - font - 3);
     }
 
     // ── 面板高（右側垂直）──
