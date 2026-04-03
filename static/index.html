@@ -998,7 +998,42 @@ function nestDrawAll(){
       ctx.strokeStyle='#404040';ctx.lineWidth=.8;ctx.stroke();
     });
   }
+// ── Canvas 上的 +C-C / +R-R 按鈕 ──
+  if(nestState.stats && compW && compH){
+    const btnW = 36, btnH = 26, gap = 4, r = 5;
+    const labelFont = `600 ${Math.max(10,Math.min(12,s*2.2))}px "IBM Plex Mono",monospace`;
+    ctx.font = labelFont;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
 
+    function drawBtn(x, y, label, key){
+      const isHover = nestState.hovBtn === key;
+      ctx.beginPath();
+      ctx.roundRect(x, y, btnW, btnH, r);
+      ctx.fillStyle = isHover ? 'rgba(0,234,208,0.18)' : 'rgba(30,30,30,0.82)';
+      ctx.fill();
+      ctx.strokeStyle = isHover ? '#00EAD0' : '#484848';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = isHover ? '#00EAD0' : '#b0b0b0';
+      ctx.fillText(label, x + btnW/2, y + btnH/2);
+      // 儲存 hit area 供點擊偵測
+      nestState._btns = nestState._btns || {};
+      nestState._btns[key] = {x, y, w:btnW, h:btnH};
+    }
+
+    // 右上角：+C / -C（面板右上，標註線外側）
+    const rightX = tx(compW) + 28;
+    const topY   = ty(compH) - pad - btnH - 6;
+    drawBtn(rightX,        topY,          '◀−C', 'mc');
+    drawBtn(rightX+btnW+gap, topY,        '+C▶', 'pc');
+
+    // 左下角：+R / -R（面板左下）
+    const leftX  = tx(0) - 28 - btnW;
+    const botY   = ty(0) + pad + 6;
+    drawBtn(leftX, botY,          '▲+R', 'pr');
+    drawBtn(leftX, botY+btnH+gap, '▼−R', 'mr');
+  }
   // ── 尺寸標註 ──────────────────────────────────────────────
   if(nestState.stats && compW && compH){
     const st = nestState.stats;
@@ -1100,12 +1135,44 @@ nc.onwheel=e=>{
   nestState.scale*=w; nestState.ox=mx-wx*nestState.scale; nestState.oy=my+wy*nestState.scale;
   nestDrawAll();
 };
-nc.onmousedown=e=>{if(e.button===1){nestState.drag=true;nestState.lx=e.clientX;nestState.ly=e.clientY;e.preventDefault();}};
+nc.onmousedown=e=>{
+  if(e.button===1){nestState.drag=true;nestState.lx=e.clientX;nestState.ly=e.clientY;e.preventDefault();return;}
+  if(e.button===0){
+    const r=nc.getBoundingClientRect();
+    const mx=e.clientX-r.left, my=e.clientY-r.top;
+    if(nestState._btns){
+      for(const [k,b] of Object.entries(nestState._btns)){
+        if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){
+          if(k==='pc') adjustLayout(1,0);
+          else if(k==='mc') adjustLayout(-1,0);
+          else if(k==='pr') adjustLayout(0,1);
+          else if(k==='mr') adjustLayout(0,-1);
+          return;
+        }
+      }
+    }
+  }
+};
 window.addEventListener('mouseup',()=>{nestState.drag=false;bridgeState.drag=false;});
 nc.onmousemove=e=>{
   if(nestState.drag){
     nestState.ox+=e.clientX-nestState.lx;nestState.oy+=e.clientY-nestState.ly;
     nestState.lx=e.clientX;nestState.ly=e.clientY;nestDrawAll();
+    return;
+  }
+  // hover 偵測
+  const r=nc.getBoundingClientRect();
+  const mx=e.clientX-r.left, my=e.clientY-r.top;
+  let hit=null;
+  if(nestState._btns){
+    for(const [k,b] of Object.entries(nestState._btns)){
+      if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){hit=k;break;}
+    }
+  }
+  if(nestState.hovBtn!==hit){
+    nestState.hovBtn=hit;
+    nc.style.cursor=hit?'pointer':'default';
+    nestDrawAll();
   }
 };
 window.addEventListener('resize',()=>{nestDrawAll();bridgeDrawAll();});
