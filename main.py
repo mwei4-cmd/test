@@ -260,92 +260,56 @@ def run_nesting(raw_poly, params, progress_cb=None):
             baf, tbf, dxf, dyf, abf = bc[3]
             bcc, bcr, bsw, bsh = bc[5], bc[6], bc[7], bc[8]
 
-            # ── 逐列推進排版（比固定 grid 更緊密）────────────────────
-            def make_pair(ox, oy):
-                """在 (ox, oy) 偏移下產生一個 A+B pair 的 union"""
+            # ── 逐格推進排版（比固定 grid 更緊密）────────────────────
+            def make_pair_union(ox, oy):
                 fa = translate(baf, ox, oy)
                 fb = translate(tbf, ox, oy)
                 return fa, fb, unary_union([fa, fb])
 
-            def push_right(col_union, target_sp):
-                """把一整列 union 從右邊推進，找到剛好 distance==target_sp 的 x offset"""
-                lo, hi = 0.0, bsw * 2
-                # 確保 hi 夠遠
-                test = translate(col_union, hi, 0)
-                while col_union.distance(test) < target_sp:
-                    hi *= 2
-                    test = translate(col_union, hi, 0)
-                for _ in range(40):
-                    mid = (lo + hi) / 2
-                    if col_union.distance(translate(col_union, mid, 0)) < target_sp:
-                        lo = mid
-                    else:
-                        hi = mid
-                return hi
-
-            def push_up(row_union, target_sp):
-                """把第一列 union 從上面推進，找到剛好 distance==target_sp 的 y offset"""
-                lo, hi = 0.0, bsh * 2
-                test = translate(row_union, 0, hi)
-                while row_union.distance(test) < target_sp:
-                    hi *= 2
-                    test = translate(row_union, 0, hi)
-                for _ in range(40):
-                    mid = (lo + hi) / 2
-                    if row_union.distance(translate(row_union, 0, mid)) < target_sp:
-                        lo = mid
-                    else:
-                        hi = mid
-                return hi
-
-            # Step 1：先算第一列各 col 的 x offset
-            col_offsets = [0.0]  # 第一格在 x=0
-            fa0, fb0, pair0_union = make_pair(0, 0)
-            current_col_union = pair0_union
+            # Step 1：算第一列各 col 的絕對 x 位置
+            # 每次用「前一格 pair union」對「原點 pair union 平移後」做二分搜尋
+            _, _, pair0_union = make_pair_union(0, 0)
+            col_x_abs = [lb]
+            prev_pair = pair0_union
 
             for c in range(1, bcc):
-                dx = push_right(current_col_union, target_sp)
-                col_offsets.append(dx)
-                # 把整列 union 往右移 dx，作為下一次的基準
-                current_col_union = unary_union([
-                    translate(current_col_union, dx, 0),
-                ])
+                lo, hi = 0.0, bsw * 2
+                while prev_pair.distance(translate(pair0_union, hi, 0)) < target_sp:
+                    hi *= 2
+                for _ in range(40):
+                    mid = (lo + hi) / 2
+                    if prev_pair.distance(translate(pair0_union, mid, 0)) < target_sp:
+                        lo = mid
+                    else:
+                        hi = mid
+                col_x_abs.append(col_x_abs[-1] + hi)
+                prev_pair = translate(pair0_union, hi, 0)
 
-            # 換算成絕對 x 位置（累積）
-            col_x_abs = []
-            acc = 0.0
-            for i, offset in enumerate(col_offsets):
-                if i == 0:
-                    col_x_abs.append(lb)
-                else:
-                    col_x_abs.append(col_x_abs[-1] + col_offsets[i])
-
-            # Step 2：算第一列所有 col 的 union（作為 row 推進的基準）
-            first_row_pairs = []
-            first_row_union_polys = []
+            # Step 2：建立第一列所有 col 的 union（作為 row 推進基準）
+            first_row_polys = []
             for c in range(bcc):
                 ox = col_x_abs[c]
-                fa, fb, pu = make_pair(ox, lb)  # 先用 lb 當 y 基準，後面會 offset
-                first_row_union_polys.append(pu)
-            first_row_union = unary_union(first_row_union_polys)
+                _, _, pu = make_pair_union(ox, db)
+                first_row_polys.append(pu)
+            base_row_union = unary_union(first_row_polys)
 
-            # Step 3：算各 row 的 y offset
-            row_offsets = [0.0]
-            current_row_union = first_row_union
+            # Step 3：算各 row 的絕對 y 位置
+            # 每次用「前一列 union」對「base_row_union 平移後」做二分搜尋
+            row_y_abs = [db]
+            prev_row = base_row_union
 
             for r in range(1, bcr):
-                dy = push_up(current_row_union, target_sp)
-                row_offsets.append(dy)
-                current_row_union = translate(current_row_union, 0, dy)
-
-            # 換算成絕對 y 位置
-            row_y_abs = []
-            acc_y = db
-            for i, offset in enumerate(row_offsets):
-                if i == 0:
-                    row_y_abs.append(db)
-                else:
-                    row_y_abs.append(row_y_abs[-1] + row_offsets[i])
+                lo, hi = 0.0, bsh * 2
+                while prev_row.distance(translate(base_row_union, 0, hi)) < target_sp:
+                    hi *= 2
+                for _ in range(40):
+                    mid = (lo + hi) / 2
+                    if prev_row.distance(translate(base_row_union, 0, mid)) < target_sp:
+                        lo = mid
+                    else:
+                        hi = mid
+                row_y_abs.append(row_y_abs[-1] + hi)
+                prev_row = translate(base_row_union, 0, hi)
 
             # Step 4：用算好的 col_x_abs / row_y_abs 鋪滿
             best_layout = []
@@ -355,8 +319,8 @@ def run_nesting(raw_poly, params, progress_cb=None):
                     oy = row_y_abs[r]
                     fa = translate(baf, ox, oy)
                     fb = translate(tbf, ox, oy)
-                    best_layout.append((fa, 0,   False, (ox,        oy)))
-                    best_layout.append((fb, abf, False, (ox + dxf,  oy + dyf)))
+                    best_layout.append((fa, 0,   False, (ox,       oy)))
+                    best_layout.append((fb, abf, False, (ox + dxf, oy + dyf)))
 
             # 更新 bsw/bsh 為平均步距（供 adjust 使用）
             if bcc > 1:
