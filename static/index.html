@@ -996,6 +996,101 @@ function nestDrawAll(){
       ctx.strokeStyle='#404040';ctx.lineWidth=.8;ctx.stroke();
     });
   }
+
+  // ── 尺寸標註 ──────────────────────────────────────────────
+  if(nestState.stats && compW && compH){
+    const st = nestState.stats;
+    const pad = 18;            // 標註線距面板邊緣的距離（螢幕像素）
+    const tickLen = 5;         // 端點短橫線長
+    const font = Math.max(11, Math.min(13, s * 2.8));
+    ctx.font = `600 ${font}px "IBM Plex Mono", monospace`;
+    ctx.textBaseline = 'middle';
+
+    // 顏色
+    const dimColor  = '#00EAD0';   // accent 藍綠
+    const partColor = '#888888';   // 零件標註灰色
+
+    // ── 面板寬（下方水平）──
+    {
+      const y0 = ty(0) + pad;
+      const x0 = tx(0), x1 = tx(compW);
+      ctx.strokeStyle = dimColor; ctx.lineWidth = 1;
+      // 主線
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y0); ctx.stroke();
+      // 左端刻度
+      ctx.beginPath(); ctx.moveTo(x0, y0-tickLen); ctx.lineTo(x0, y0+tickLen); ctx.stroke();
+      // 右端刻度
+      ctx.beginPath(); ctx.moveTo(x1, y0-tickLen); ctx.lineTo(x1, y0+tickLen); ctx.stroke();
+      // 文字
+      const wLabel = compW.toFixed(1) + ' mm';
+      ctx.fillStyle = dimColor;
+      ctx.textAlign = 'center';
+      ctx.fillText(wLabel, (x0+x1)/2, y0 + font + 3);
+    }
+
+    // ── 面板高（右側垂直）──
+    {
+      const x0 = tx(compW) + pad;
+      const y0 = ty(0), y1 = ty(compH);
+      ctx.strokeStyle = dimColor; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x0-tickLen, y0); ctx.lineTo(x0+tickLen, y0); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x0-tickLen, y1); ctx.lineTo(x0+tickLen, y1); ctx.stroke();
+      const hLabel = compH.toFixed(1) + ' mm';
+      ctx.fillStyle = dimColor;
+      ctx.save();
+      ctx.translate(x0 + font + 4, (y0+y1)/2);
+      ctx.rotate(Math.PI/2);
+      ctx.textAlign = 'center';
+      ctx.fillText(hLabel, 0, 0);
+      ctx.restore();
+    }
+
+    // ── 零件尺寸（標在第一個零件上）──
+    if(nestState.polys && nestState.polys.length > 0){
+      const poly = nestState.polys[0];
+      const xs = poly.exterior.map(p=>p[0]);
+      const ys = poly.exterior.map(p=>p[1]);
+      const px0=Math.min(...xs), px1=Math.max(...xs);
+      const py0=Math.min(...ys), py1=Math.max(...ys);
+      const pw = st.p_w, ph = st.p_h;
+
+      // 零件寬（零件正上方）
+      {
+        const ymid = ty(py0) - 10;
+        const xa = tx(px0), xb = tx(px1);
+        ctx.strokeStyle = partColor; ctx.lineWidth = 0.8;
+        ctx.setLineDash([3,3]);
+        ctx.beginPath(); ctx.moveTo(xa, ymid); ctx.lineTo(xb, ymid); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(xa, ymid-tickLen*.7); ctx.lineTo(xa, ymid+tickLen*.7); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(xb, ymid-tickLen*.7); ctx.lineTo(xb, ymid+tickLen*.7); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = partColor;
+        ctx.textAlign = 'center';
+        ctx.fillText(pw.toFixed(2)+'', (xa+xb)/2, ymid - font - 1);
+      }
+
+      // 零件高（零件左側）
+      {
+        const xmid = tx(px0) - 10;
+        const ya = ty(py0), yb = ty(py1);
+        ctx.strokeStyle = partColor; ctx.lineWidth = 0.8;
+        ctx.setLineDash([3,3]);
+        ctx.beginPath(); ctx.moveTo(xmid, ya); ctx.lineTo(xmid, yb); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(xmid-tickLen*.7, ya); ctx.lineTo(xmid+tickLen*.7, ya); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(xmid-tickLen*.7, yb); ctx.lineTo(xmid+tickLen*.7, yb); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = partColor;
+        ctx.save();
+        ctx.translate(xmid - font - 2, (ya+yb)/2);
+        ctx.rotate(-Math.PI/2);
+        ctx.textAlign = 'center';
+        ctx.fillText(ph.toFixed(2)+'', 0, 0);
+        ctx.restore();
+      }
+    }
+  }
+  // ── /尺寸標註 ──────────────────────────────────────────────
 }
 
 nc.onwheel=e=>{
