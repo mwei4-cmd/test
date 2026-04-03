@@ -276,7 +276,7 @@ input[type=range]{
 /* ── Nest info bar (1/3 panel height) ── */
 #nest-infobar{
   flex:1;
-  max-height:180px;
+  max-height:200px;
   display:flex;
   flex-direction:row;
   border-bottom:1px solid var(--border);
@@ -654,7 +654,7 @@ canvas{display:block;width:100%;height:100%}
         gap:12px;
         align-items:center;
         flex-wrap:wrap;
-        max-height:60px;min-height:0;
+        max-height:100px;min-height:0;
       ">
         <!-- 登入狀態 -->
         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
@@ -913,6 +913,7 @@ async function runNesting(){
         nestZoomReset(); nestDrawAll();
         if(d.top3&&d.top3.length){ setTimeout(()=>drawBestPair(d.top3[0]), 50); }
         renderMetrics(d.stats);
+        renderSuggest(d.stats);
         bridgeState.lines=d.lines;
         bridgeState.connectors=[];
         bridgeState.compW=d.compressed_w;
@@ -1137,6 +1138,7 @@ function renderMetrics(s){
   document.getElementById('si-pcs').innerHTML = s.pcs+'<span class="stat-unit">pcs</span>';
   document.getElementById('si-grid').textContent= s.cols+' × '+s.rows;
   document.getElementById('adj-btns').style.display='flex';
+  document.getElementById('si-orig').textContent = s.original_w+' × '+s.original_h+' mm';
   document.getElementById('si-panel').textContent= s.compressed_w+' × '+s.compressed_h+' mm';
 }
 
@@ -1151,13 +1153,26 @@ async function adjustLayout(dcol, drow){
   nestState.polys=d.polys; nestState.compW=d.compressed_w; nestState.compH=d.compressed_h;
   nestState.stats=d.stats;
   nestZoomReset(); nestDrawAll();
-  renderMetrics(d.stats); 
+  renderMetrics(d.stats); renderSuggest(d.stats);
   bridgeState.lines=d.lines; bridgeState.connectors=[];
   bridgeState.compW=d.compressed_w; bridgeState.compH=d.compressed_h;
   nestDrawAll(); renderStatsTable(d.stats);
   sheetAutoFill();  // ← adjust 後也更新
 }
 
+function renderSuggest(s){
+  // 更新按鈕旁的建議尺寸（用已壓縮後的實際數據）
+  const colEl = document.getElementById('si-sug-col-inline');
+  const rowEl = document.getElementById('si-sug-row-inline');
+  if(!colEl || !rowEl) return;
+  if(s.suggest_w){
+    colEl.textContent = '+1 Col  W ≥ ' + s.suggest_w + ' mm';
+    rowEl.textContent = '+1 Row  H ≥ ' + s.suggest_h + ' mm';
+  } else {
+    colEl.textContent = '+1 Col —';
+    rowEl.textContent = '+1 Row —';
+  }
+}
 
 function renderStatsTable(s){
   document.getElementById('stats-table').style.display='block';
