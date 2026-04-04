@@ -94,7 +94,46 @@ async def sheet_calculate(request: Request):
         sheets = svc.spreadsheets()
         print(f"[Sheet] SHEET_ID={SHEET_ID}, SHEET_TAB={SHEET_TAB}")
 
-        # 先只測試讀取，不寫入
+        # ── 寫入 B11:J11 ──────────────────────────────────────────
+        sheets.values().batchUpdate(
+            spreadsheetId=SHEET_ID,
+            body={
+                "valueInputOption": "USER_ENTERED",
+                "data": [
+                    {"range": f"{SHEET_TAB}!B11", "values": [[body.get("B11", "")]]},
+                    {"range": f"{SHEET_TAB}!C11", "values": [[body.get("C11", "")]]},
+                    {"range": f"{SHEET_TAB}!D11", "values": [[body.get("D11", "")]]},
+                    {"range": f"{SHEET_TAB}!E11", "values": [[body.get("E11", "")]]},
+                    {"range": f"{SHEET_TAB}!F11", "values": [[body.get("F11", "")]]},
+                    {"range": f"{SHEET_TAB}!G11", "values": [[body.get("G11", "")]]},
+                    {"range": f"{SHEET_TAB}!H11", "values": [[body.get("H11", "")]]},
+                    {"range": f"{SHEET_TAB}!I11", "values": [[body.get("I11", "")]]},
+                    {"range": f"{SHEET_TAB}!J11", "values": [[body.get("J11", 250)]]},
+                ]
+            }
+        ).execute()
+        print(f"[Sheet] B11:J11 written")
+
+        # ── 寫入 C14:C20 逐格 ─────────────────────────────────────
+        for cell, key in [("C14","C14"),("C15","C15"),("C16","C16"),
+                           ("C17","C17"),("C18","C18"),("C19","C19"),("C20","C20")]:
+            val = body.get(key, "")
+            if val == "" or val is None:
+                continue
+            try:
+                sheets.values().update(
+                    spreadsheetId=SHEET_ID,
+                    range=f"{SHEET_TAB}!{cell}",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [[val]]}
+                ).execute()
+            except Exception as cell_err:
+                print(f"[Sheet] {cell} write failed: {cell_err}")
+        print(f"[Sheet] C14:C20 written")
+
+        time.sleep(1.5)
+
+        # ── 讀回 C27, C28 ─────────────────────────────────────────
         result = sheets.values().batchGet(
             spreadsheetId=SHEET_ID,
             ranges=[f"{SHEET_TAB}!C27", f"{SHEET_TAB}!C28"],
