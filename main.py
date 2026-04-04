@@ -259,75 +259,11 @@ def run_nesting(raw_poly, params, progress_cb=None):
             bc = candidates[0]
             baf, tbf, dxf, dyf, abf = bc[3]
             bcc, bcr, bsw, bsh = bc[5], bc[6], bc[7], bc[8]
-
-            # ── 逐格推進排版（比固定 grid 更緊密）────────────────────
-            def make_pair_union(ox, oy):
-                fa = translate(baf, ox, oy)
-                fb = translate(tbf, ox, oy)
-                return fa, fb, unary_union([fa, fb])
-
-            # Step 1：算第一列各 col 的絕對 x 位置
-            # 每次用「前一格 pair union」對「原點 pair union 平移後」做二分搜尋
-            _, _, pair0_union = make_pair_union(0, 0)
-            col_x_abs = [lb]
-            prev_pair = pair0_union
-
-            for c in range(1, bcc):
-                lo, hi = 0.0, bsw * 2
-                while prev_pair.distance(translate(pair0_union, hi, 0)) < target_sp:
-                    hi *= 2
-                for _ in range(40):
-                    mid = (lo + hi) / 2
-                    if prev_pair.distance(translate(pair0_union, mid, 0)) < target_sp:
-                        lo = mid
-                    else:
-                        hi = mid
-                col_x_abs.append(col_x_abs[-1] + hi)
-                prev_pair = translate(pair0_union, hi, 0)
-
-            # Step 2：建立第一列所有 col 的 union（作為 row 推進基準）
-            first_row_polys = []
-            for c in range(bcc):
-                ox = col_x_abs[c]
-                _, _, pu = make_pair_union(ox, db)
-                first_row_polys.append(pu)
-            base_row_union = unary_union(first_row_polys)
-
-            # Step 3：算各 row 的絕對 y 位置
-            # 每次用「前一列 union」對「base_row_union 平移後」做二分搜尋
-            row_y_abs = [db]
-            prev_row = base_row_union
-
-            for r in range(1, bcr):
-                lo, hi = 0.0, bsh * 2
-                while prev_row.distance(translate(base_row_union, 0, hi)) < target_sp:
-                    hi *= 2
-                for _ in range(40):
-                    mid = (lo + hi) / 2
-                    if prev_row.distance(translate(base_row_union, 0, mid)) < target_sp:
-                        lo = mid
-                    else:
-                        hi = mid
-                row_y_abs.append(row_y_abs[-1] + hi)
-                prev_row = translate(base_row_union, 0, hi)
-
-            # Step 4：用算好的 col_x_abs / row_y_abs 鋪滿
-            best_layout = []
-            for r in range(bcr):
-                for c in range(bcc):
-                    ox = col_x_abs[c]
-                    oy = row_y_abs[r]
-                    fa = translate(baf, ox, oy)
-                    fb = translate(tbf, ox, oy)
-                    best_layout.append((fa, 0,   False, (ox,       oy)))
-                    best_layout.append((fb, abf, False, (ox + dxf, oy + dyf)))
-
-            # 更新 bsw/bsh 為平均步距（供 adjust 使用）
-            if bcc > 1:
-                bsw = (col_x_abs[-1] - col_x_abs[0]) / (bcc - 1)
-            if bcr > 1:
-                bsh = (row_y_abs[-1] - row_y_abs[0]) / (bcr - 1)
-                
+            for tx, ty in bc[2]:
+                fa = translate(baf, tx, ty)
+                fb = translate(tbf, tx, ty)
+                best_layout.append((fa, 0, False, (tx, ty)))
+                best_layout.append((fb, abf, False, (tx+dxf, ty+dyf)))
     elif "V-Cut" in mode:
         max_found = 0
         for ang in [0, 90, 180, 270]:
