@@ -831,6 +831,10 @@ function switchTab(name){
     else if(i < idx){ el.classList.add('done'); circle.textContent = '✓'; }
     else { circle.textContent = i+1; }
   });
+
+   // ── 只在 Layout tab 顯示 sidebar ──
+  document.getElementById('sidebar').style.display = name === 'nest' ? '' : 'none';
+  
   if(name==='bridge') bridgeZoomReset();
   if(name==='nest') nestZoomReset();
 }
