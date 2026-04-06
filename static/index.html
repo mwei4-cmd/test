@@ -133,7 +133,6 @@ body{
   border-left-color: var(--border2);
 }
 
-/* active step */
 .step-item.active .step-circle{
   border-color:var(--accent);
   background:var(--accent);
@@ -142,16 +141,12 @@ body{
 .step-item.active .step-label{
   color:var(--accent);
 }
-
-/* completed step */
 .step-item.done .step-circle{
   border-color:var(--border3);
   background:transparent;
   color:var(--border3);
 }
 .step-item.done .step-label{color:var(--text4)}
-
-/* hover */
 .step-item:hover:not(.active) .step-circle{border-color:var(--text3);color:var(--text3)}
 .step-item:hover:not(.active) .step-label{color:var(--text3)}
 
@@ -289,7 +284,7 @@ input[type=range]{
   line-height:1.4;
 }
 
-/* ── Nest info bar (1/3 panel height) ── */
+/* ── Nest info bar ── */
 #nest-infobar{
   flex:1;
   max-height:200px;
@@ -301,7 +296,6 @@ input[type=range]{
   min-height:0;
 }
 
-/* left column: all text stats */
 #info-left-col{
   flex:1;
   display:flex;
@@ -310,7 +304,6 @@ input[type=range]{
   min-width:0;
 }
 
-/* row 1 inside left col */
 .info-stat-row{
   flex:1;
   display:flex;
@@ -327,7 +320,6 @@ input[type=range]{
 }
 .stat-block:first-child{padding-left:0}
 
-/* row 2 inside left col */
 .info-size-row{
   flex:1;
   display:flex;
@@ -349,7 +341,6 @@ input[type=range]{
   gap:4px;
 }
 
-/* right column: best pair canvas */
 #info-right-col{
   width:50%;
   flex-shrink:0;
@@ -370,7 +361,6 @@ input[type=range]{
   display:block !important;
 }
 
-/* shared stat typography */
 .stat-label{
   font-size:11px;
   color:var(--text3);
@@ -400,7 +390,6 @@ input[type=range]{
   height:1px;background:var(--border);flex-shrink:0;
 }
 
-/* remove old suggest-box */
 #suggest-box{display:none !important}
 
 /* ── Arrow adjust buttons ── */
@@ -424,7 +413,6 @@ input[type=range]{
 .adj-btn:hover{border-color:var(--accent);color:var(--accent)}
 .adj-btn:active{background:var(--accent);color:#000;border-color:var(--accent)}
 
-/* SVG arrow icons inside buttons */
 .adj-btn svg{
   width:12px;
   height:12px;
@@ -432,7 +420,7 @@ input[type=range]{
   display:block;
 }
 
-/* ── Canvas (flex:2 so infobar is 1/3, canvas is 2/3) ── */
+/* ── Canvas ── */
 #nest-canvas-wrap{
   flex:2;
   overflow:hidden;position:relative;
@@ -454,6 +442,7 @@ canvas{display:block;width:100%;height:100%}
   padding:10px 16px;
   border-bottom:1px solid var(--border);
   flex-shrink:0;
+  flex-wrap:wrap;
 }
 .bridge-btn{
   padding:7px 16px;
@@ -470,6 +459,84 @@ canvas{display:block;width:100%;height:100%}
 }
 .bridge-btn:hover{border-color:var(--accent);color:var(--accent)}
 .bridge-btn:active{background:var(--accent);border-color:var(--accent);color:#000}
+.bridge-btn:disabled{
+  border-color:var(--border);
+  color:var(--text4);
+  cursor:not-allowed;
+  opacity:0.5;
+}
+
+/* ── Propagate button – special accent style ── */
+#propagate-btn{
+  padding:7px 18px;
+  border-radius:4px;
+  border:1px solid var(--accent);
+  background:transparent;
+  color:var(--accent);
+  cursor:pointer;
+  font-size:13px;
+  font-weight:600;
+  font-family:var(--mono);
+  letter-spacing:0.08em;
+  transition:all .15s;
+  display:flex;
+  align-items:center;
+  gap:7px;
+  position:relative;
+  overflow:hidden;
+}
+#propagate-btn::before{
+  content:'';
+  position:absolute;
+  inset:0;
+  background:var(--accent);
+  opacity:0;
+  transition:opacity .15s;
+}
+#propagate-btn:hover::before{opacity:0.08}
+#propagate-btn:active{background:var(--accent);color:#000}
+#propagate-btn:disabled{
+  border-color:var(--border2);
+  color:var(--text4);
+  cursor:not-allowed;
+}
+#propagate-btn:disabled::before{display:none}
+#propagate-btn svg{
+  width:13px;height:13px;
+  fill:none;stroke:currentColor;stroke-width:1.8;
+  flex-shrink:0;
+  position:relative;z-index:1;
+}
+#propagate-btn span{position:relative;z-index:1;}
+
+/* ── Propagate badge ── */
+#prop-badge{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  padding:3px 9px;
+  border-radius:3px;
+  background:color-mix(in srgb,var(--accent) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);
+  font-size:11px;
+  font-family:var(--mono);
+  color:var(--accent);
+  letter-spacing:.08em;
+  white-space:nowrap;
+  display:none;
+}
+#prop-badge::before{
+  content:'◈';
+  font-size:9px;
+}
+
+/* flash animation on propagate success */
+@keyframes prop-flash{
+  0%{background:color-mix(in srgb,var(--accent) 20%,transparent)}
+  100%{background:transparent}
+}
+.prop-flashing{animation:prop-flash .5s ease-out}
+
 #bridge-status{
   font-size:13px;
   color:var(--text3);
@@ -611,10 +678,8 @@ canvas{display:block;width:100%;height:100%}
     <div id="panel-nest" class="panel active">
       <div id="nest-infobar" style="display:none">
 
-        <!-- Left: all text stats stacked -->
         <div id="info-left-col">
 
-          <!-- Row 1: Count + Cols×Rows -->
           <div class="info-stat-row">
             <div class="stat-block">
               <span class="stat-label">Count</span>
@@ -625,16 +690,13 @@ canvas{display:block;width:100%;height:100%}
               <span class="stat-label">Cols × Rows</span>
               <div style="display:flex;align-items:center;gap:8px">
                 <span class="stat-val" id="si-grid">—</span>
-                <!-- Arrow adjust buttons: Col (←→) and Row (↑↓) -->
                 <div class="adj-btns" id="adj-btns" style="display:none">
-                  <!-- Col buttons: left arrow (−C) and right arrow (+C) -->
                   <button class="adj-btn" onclick="adjustLayout(-1,0)" title="−1 col">
                     <svg viewBox="0 0 12 12"><path d="M8 1L3 6l5 5"/></svg>
                   </button>
                   <button class="adj-btn" onclick="adjustLayout(1,0)" title="+1 col">
                     <svg viewBox="0 0 12 12"><path d="M4 1l5 5-5 5"/></svg>
                   </button>
-                  <!-- Row buttons: up arrow (−R) and down arrow (+R) -->
                   <button class="adj-btn" onclick="adjustLayout(0,-1)" title="−1 row">
                     <svg viewBox="0 0 12 12"><path d="M1 8l5-5 5 5"/></svg>
                   </button>
@@ -648,7 +710,6 @@ canvas{display:block;width:100%;height:100%}
 
           <div class="info-hline"></div>
 
-          <!-- Row 2: Compressed panel size only -->
           <div class="info-size-row">
             <div class="size-col">
               <div class="size-entry">
@@ -660,7 +721,6 @@ canvas{display:block;width:100%;height:100%}
 
         </div>
 
-        <!-- Right: Best Pair canvas (50% width) -->
         <div id="info-right-col">
           <span class="stat-label">Best Pair</span>
           <canvas id="c3-0"></canvas>
@@ -668,7 +728,7 @@ canvas{display:block;width:100%;height:100%}
 
       </div>
 
-      <!-- ── Sheet Calculator Bar ─────────────────────────────── -->
+      <!-- Sheet Calculator Bar -->
       <div id="sh-bar" style="
         display:none;
         flex-shrink:0;
@@ -680,14 +740,12 @@ canvas{display:block;width:100%;height:100%}
         flex-wrap:wrap;
         max-height:100px;min-height:0;
       ">
-        <!-- 登入狀態 -->
         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
           <span style="font-size:10px;letter-spacing:.1em;color:var(--accent);font-family:var(--mono);">◈ Sheet</span>
         </div>
 
         <div id="sh-inputs" style="display:none;align-items:center;gap:8px;flex:1;flex-wrap:wrap;">
 
-          <!-- 自動帶入欄位（唯讀）-->
           <div style="display:flex;align-items:center;gap:4px;">
             <span style="font-size:10px;color:var(--text3);font-family:var(--mono);white-space:nowrap;">L</span>
             <input id="sh-B11" type="number" readonly tabindex="-1" style="
@@ -719,7 +777,6 @@ canvas{display:block;width:100%;height:100%}
 
           <div style="width:1px;height:24px;background:var(--border);flex-shrink:0;"></div>
 
-          <!-- 手動填入欄位 -->
           <div style="display:flex;align-items:center;gap:4px;">
             <span style="font-size:10px;color:var(--text2);font-family:var(--mono);white-space:nowrap;">BandL</span>
             <input id="sh-F11" type="number" style="
@@ -758,14 +815,12 @@ canvas{display:block;width:100%;height:100%}
 
           <div style="width:1px;height:24px;background:var(--border);flex-shrink:0;"></div>
 
-          <!-- C14:C20 Dropdowns -->
           <div id="sh-dropdowns" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
             <span style="font-size:10px;color:var(--text3);font-family:var(--mono);">載入中…</span>
           </div>
 
           <div style="width:1px;height:24px;background:var(--border);flex-shrink:0;"></div>
 
-          <!-- 送出 + 結果 -->
           <button onclick="sheetCalculate()" style="
             padding:5px 14px;border-radius:3px;
             border:1px solid var(--accent);
@@ -779,7 +834,6 @@ canvas{display:block;width:100%;height:100%}
           </button>
           <span id="sh-status" style="font-size:11px;color:var(--text3);font-family:var(--mono);white-space:nowrap;"></span>
 
-          <!-- 結果數值 -->
           <div id="sh-result" style="display:none;align-items:center;gap:12px;flex-shrink:0;">
             <div style="width:1px;height:24px;background:var(--border);"></div>
             <div>
@@ -794,7 +848,6 @@ canvas{display:block;width:100%;height:100%}
 
         </div>
       </div>
-      <!-- ── /Sheet Calculator Bar ── -->
 
       <div id="nest-canvas-wrap" style="flex:1;overflow:hidden;position:relative;background:#000;min-height:0;">
         <canvas id="nest-canvas"></canvas>
@@ -806,6 +859,26 @@ canvas{display:block;width:100%;height:100%}
       <div id="bridge-bar">
         <button class="bridge-btn" onclick="undoBridge()">Undo</button>
         <button class="bridge-btn" onclick="resetBridge()">Reset All</button>
+
+        <!-- divider -->
+        <div style="width:1px;height:22px;background:var(--border2);flex-shrink:0;margin:0 4px;"></div>
+
+        <!-- Propagate button -->
+        <button id="propagate-btn" onclick="propagateBridge()" disabled title="Propagate bridges to all copies">
+          <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+            <!-- grid-copy icon: 4 small squares with arrows -->
+            <rect x="1" y="1" width="5" height="5" rx="1"/>
+            <rect x="10" y="1" width="5" height="5" rx="1"/>
+            <rect x="1" y="10" width="5" height="5" rx="1"/>
+            <rect x="10" y="10" width="5" height="5" rx="1"/>
+            <path d="M6.5 3.5h3M3.5 6.5v3M12.5 6.5v3M6.5 12.5h3" stroke-linecap="round"/>
+          </svg>
+          <span id="propagate-label">Propagate All</span>
+        </button>
+
+        <!-- badge: shows after propagation -->
+        <span id="prop-badge"></span>
+
         <span id="bridge-status">Click two line segments to create a bridge &nbsp;|&nbsp; Scroll to zoom &nbsp;|&nbsp; Middle-drag to pan</span>
       </div>
       <div id="bridge-canvas-wrap"><canvas id="bridge-canvas"></canvas></div>
@@ -847,10 +920,7 @@ function switchTab(name){
     else if(i < idx){ el.classList.add('done'); circle.textContent = '✓'; }
     else { circle.textContent = i+1; }
   });
-
-   // ── 只在 Layout tab 顯示 sidebar ──
   document.getElementById('sidebar').style.display = name === 'nest' ? '' : 'none';
-  
   if(name==='bridge') bridgeZoomReset();
   if(name==='nest') nestZoomReset();
 }
@@ -891,6 +961,8 @@ async function doUpload(file){
 // ── Run nesting ──
 async function runNesting(){
   showLoading('Initializing');
+  // reset propagate state when re-running layout
+  resetPropagateState();
   const params={
     panel_w:+document.getElementById('pw').value,
     panel_h:+document.getElementById('ph').value,
@@ -1026,7 +1098,6 @@ function nestDrawAll(){
     });
   }
 
-  // ── 尺寸標註 ──────────────────────────────────────────────
   if(nestState.stats && compW && compH){
     const st = nestState.stats;
     const pad = 18;
@@ -1034,10 +1105,8 @@ function nestDrawAll(){
     const font = Math.max(11, Math.min(13, s * 2.8));
     ctx.font = `600 ${font}px "IBM Plex Mono", monospace`;
     ctx.textBaseline = 'middle';
-
     const dimColor  = '#00EAD0';
     const partColor = '#888888';
-
     {
       const y0 = ty(compH) - pad;
       const x0 = tx(0), x1 = tx(compW);
@@ -1045,12 +1114,9 @@ function nestDrawAll(){
       ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y0); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(x0, y0-tickLen); ctx.lineTo(x0, y0+tickLen); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(x1, y0-tickLen); ctx.lineTo(x1, y0+tickLen); ctx.stroke();
-      const wLabel = compW.toFixed(1) + ' mm';
-      ctx.fillStyle = dimColor;
-      ctx.textAlign = 'center';
-      ctx.fillText(wLabel, (x0+x1)/2, y0 - font - 3);
+      ctx.fillStyle = dimColor; ctx.textAlign = 'center';
+      ctx.fillText(compW.toFixed(1) + ' mm', (x0+x1)/2, y0 - font - 3);
     }
-
     {
       const x0 = tx(compW) + pad;
       const y0 = ty(0), y1 = ty(compH);
@@ -1058,16 +1124,13 @@ function nestDrawAll(){
       ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(x0-tickLen, y0); ctx.lineTo(x0+tickLen, y0); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(x0-tickLen, y1); ctx.lineTo(x0+tickLen, y1); ctx.stroke();
-      const hLabel = compH.toFixed(1) + ' mm';
       ctx.fillStyle = dimColor;
       ctx.save();
       ctx.translate(x0 + font + 4, (y0+y1)/2);
-      ctx.rotate(Math.PI/2);
-      ctx.textAlign = 'center';
-      ctx.fillText(hLabel, 0, 0);
+      ctx.rotate(Math.PI/2); ctx.textAlign = 'center';
+      ctx.fillText(compH.toFixed(1) + ' mm', 0, 0);
       ctx.restore();
     }
-
     if(nestState.polys && nestState.polys.length > 0){
       const poly = nestState.polys[0];
       const xs = poly.exterior.map(p=>p[0]);
@@ -1075,7 +1138,6 @@ function nestDrawAll(){
       const px0=Math.min(...xs), px1=Math.max(...xs);
       const py0=Math.min(...ys), py1=Math.max(...ys);
       const pw = st.p_w, ph = st.p_h;
-
       {
         const ymid = ty(py0) - 10;
         const xa = tx(px0), xb = tx(px1);
@@ -1085,11 +1147,9 @@ function nestDrawAll(){
         ctx.beginPath(); ctx.moveTo(xa, ymid-tickLen*.7); ctx.lineTo(xa, ymid+tickLen*.7); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(xb, ymid-tickLen*.7); ctx.lineTo(xb, ymid+tickLen*.7); ctx.stroke();
         ctx.setLineDash([]);
-        ctx.fillStyle = partColor;
-        ctx.textAlign = 'center';
+        ctx.fillStyle = partColor; ctx.textAlign = 'center';
         ctx.fillText(pw.toFixed(2)+'', (xa+xb)/2, ymid - font - 1);
       }
-
       {
         const xmid = tx(px0) - 10;
         const ya = ty(py0), yb = ty(py1);
@@ -1100,16 +1160,13 @@ function nestDrawAll(){
         ctx.beginPath(); ctx.moveTo(xmid-tickLen*.7, yb); ctx.lineTo(xmid+tickLen*.7, yb); ctx.stroke();
         ctx.setLineDash([]);
         ctx.fillStyle = partColor;
-        ctx.save();
-        ctx.translate(xmid - font - 2, (ya+yb)/2);
-        ctx.rotate(-Math.PI/2);
-        ctx.textAlign = 'center';
+        ctx.save(); ctx.translate(xmid - font - 2, (ya+yb)/2);
+        ctx.rotate(-Math.PI/2); ctx.textAlign = 'center';
         ctx.fillText(ph.toFixed(2)+'', 0, 0);
         ctx.restore();
       }
     }
   }
-  // ── /尺寸標註 ──────────────────────────────────────────────
 }
 
 nc.onwheel=e=>{
@@ -1178,6 +1235,8 @@ async function adjustLayout(dcol, drow){
   bridgeState.compW=d.compressed_w; bridgeState.compH=d.compressed_h;
   nestDrawAll(); renderStatsTable(d.stats);
   sheetAutoFill();
+  // reset propagate state when adjusting
+  resetPropagateState();
 }
 
 function renderStatsTable(s){
@@ -1326,23 +1385,89 @@ bc.onmousemove=e=>{
 };
 
 function setStatus(msg){document.getElementById('bridge-status').textContent=msg;}
+
 async function doBridge(idx1,pt1,idx2){
-  setStatus('計算中...');
+  setStatus('Computing...');
   const r=await fetch('/bridge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idx1,pt1:[pt1.x,pt1.y],idx2})});
   const d=await r.json();
   if(!d.ok){setStatus('Error: '+d.error);return;}
   bridgeState.lines=d.lines; bridgeState.connectors=d.connectors;
-  setStatus('Bridge added  —  total: '+d.connectors.length); bridgeDrawAll();
+  // enable propagate button after at least one bridge is placed
+  document.getElementById('propagate-btn').disabled = false;
+  setStatus('Bridge added  —  total: '+d.connectors.length+' &nbsp;|&nbsp; Click ◈ Propagate All to copy to all copies');
+  bridgeDrawAll();
 }
+
 async function undoBridge(){
   const r=await fetch('/undo',{method:'POST'});
   const d=await r.json();
-  if(d.ok){bridgeState.lines=d.lines;bridgeState.connectors=d.connectors;bridgeDrawAll();setStatus('Undone');}
+  if(d.ok){
+    bridgeState.lines=d.lines;
+    bridgeState.connectors=d.connectors;
+    bridgeDrawAll();
+    setStatus('Undone');
+    // disable propagate if no connectors left
+    if(d.connectors.length===0){
+      document.getElementById('propagate-btn').disabled=true;
+      resetPropagateState();
+    }
+  }
 }
+
 async function resetBridge(){
   const r=await fetch('/reset_bridge',{method:'POST'});
   const d=await r.json();
-  if(d.ok){bridgeState.lines=d.lines;bridgeState.connectors=[];bridgeDrawAll();setStatus('Reset complete');}
+  if(d.ok){
+    bridgeState.lines=d.lines;
+    bridgeState.connectors=[];
+    bridgeDrawAll();
+    setStatus('Reset complete');
+    document.getElementById('propagate-btn').disabled=true;
+    resetPropagateState();
+  }
+}
+
+// ── Propagate Bridge ──────────────────────────────────────────────────────────
+function resetPropagateState(){
+  const badge = document.getElementById('prop-badge');
+  badge.style.display = 'none';
+  badge.textContent = '';
+  document.getElementById('propagate-btn').disabled = true;
+  document.getElementById('propagate-label').textContent = 'Propagate All';
+}
+
+async function propagateBridge(){
+  const btn = document.getElementById('propagate-btn');
+  const badge = document.getElementById('prop-badge');
+  btn.disabled = true;
+  setStatus('Propagating bridges to all copies…');
+
+  try {
+    const r = await fetch('/propagate_bridge', {method:'POST'});
+    const d = await r.json();
+    if(!d.ok){ setStatus('Propagate failed: '+(d.error||'unknown error')); btn.disabled=false; return; }
+
+    bridgeState.lines = d.lines;
+    bridgeState.connectors = d.connectors;
+    bridgeDrawAll();
+
+    // show badge
+    badge.textContent = '◈ ×' + d.connectors.length + ' bridges';
+    badge.style.display = 'inline-flex';
+
+    // flash the canvas wrap
+    const wrap = document.getElementById('bridge-canvas-wrap');
+    wrap.classList.add('prop-flashing');
+    setTimeout(()=>wrap.classList.remove('prop-flashing'), 600);
+
+    setStatus('Propagated — ' + d.connectors.length + ' bridges total across ' + d.copies + ' copies');
+    document.getElementById('propagate-label').textContent = 'Re-propagate';
+    btn.disabled = false;
+
+  } catch(e){
+    setStatus('Propagate error: '+e.message);
+    btn.disabled = false;
+  }
 }
 
 function downloadNest(){window.location='/download_nest_dxf';}
@@ -1365,30 +1490,17 @@ async function sheetInit() {
   } catch(e) {}
   document.getElementById('sh-bar').style.display = 'flex';
 }
-function _shLoggedIn() {
-  document.getElementById('sh-auth-label').textContent = '已登入';
-  document.getElementById('sh-auth-label').style.color = 'var(--accent)';
-  document.getElementById('sh-auth-btn').textContent = 'Logout';
-  document.getElementById('sh-auth-btn').onclick = sheetLogout;
-  document.getElementById('sh-inputs').style.display = 'flex';
-}
-
-function sheetLogin() { window.location.href = '/auth/login'; }
-async function sheetLogout() { await fetch('/auth/logout'); location.reload(); }
 
 function sheetAutoFill() {
   const s = nestState.stats;
   if (!s) return;
   const set = (id, val) => { if (val != null) document.getElementById(id).value = +val; };
-
   set('sh-B11', s.p_w);
   set('sh-C11', s.p_h);
   set('sh-D11', s.cols);
   set('sh-E11', s.rows);
-
   set('sh-H11', s.gap_x);
   set('sh-I11', s.gap_y);
-
   const bandLeft = parseFloat(document.getElementById('ml').value);
   const bandTop  = parseFloat(document.getElementById('mt').value);
   if (!isNaN(bandLeft)) document.getElementById('sh-G11').value = bandLeft;
@@ -1396,13 +1508,8 @@ function sheetAutoFill() {
 }
 
 const SH_LABELS = {
-  C14: 'Category',
-  C15: 'Layer count',
-  C16: 'CCL type',
-  C17: 'Thickness',
-  C18: '90D rotation',
-  C19: 'Outline shearing',
-  C20: 'Irregular nesting',
+  C14: 'Category', C15: 'Layer count', C16: 'CCL type', C17: 'Thickness',
+  C18: '90D rotation', C19: 'Outline shearing', C20: 'Irregular nesting',
 };
 
 async function sheetLoadDropdowns() {
@@ -1430,6 +1537,7 @@ async function sheetLoadDropdowns() {
     box.innerHTML = `<span style="color:#f55;font-size:10px;">讀取失敗</span>`;
   }
 }
+
 async function sheetCalculate() {
   const status = document.getElementById('sh-status');
   const result = document.getElementById('sh-result');
