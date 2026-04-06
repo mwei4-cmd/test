@@ -1504,15 +1504,14 @@ function sheetAutoFill() {
   const spacing = parseFloat(document.getElementById('spacing').value);
 
   if (mode.includes('Nesting')) {
-    // GapL = nest_gap（最佳對實際距離），GapW = 使用者填的 spacing
-    set('sh-H11', s.nest_gap != null ? s.nest_gap : s.gap_x);
+    // GapL = gap_x（bbox 間距，可能為負數，代表鑲嵌深度）
+    // GapW = 使用者填的 spacing
+    set('sh-H11', s.gap_x);
     set('sh-I11', !isNaN(spacing) ? spacing : s.gap_y);
   } else {
-    // Matrix / V-Cut：兩個都填 spacing
     set('sh-H11', !isNaN(spacing) ? spacing : s.gap_x);
     set('sh-I11', !isNaN(spacing) ? spacing : s.gap_y);
   }
-
   const bandLeft = parseFloat(document.getElementById('ml').value);
   const bandTop  = parseFloat(document.getElementById('mt').value);
   if (!isNaN(bandLeft)) document.getElementById('sh-G11').value = bandLeft;
