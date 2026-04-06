@@ -1488,7 +1488,6 @@ async function sheetInit() {
       sheetLoadDropdowns();
     }
   } catch(e) {}
-  document.getElementById('sh-bar').style.display = 'flex';
 }
 
 function sheetAutoFill() {
@@ -1505,6 +1504,7 @@ function sheetAutoFill() {
   const bandTop  = parseFloat(document.getElementById('mt').value);
   if (!isNaN(bandLeft)) document.getElementById('sh-G11').value = bandLeft;
   if (!isNaN(bandTop))  document.getElementById('sh-F11').value = bandTop;
+  document.getElementById('sh-bar').style.display = 'flex';
 }
 
 const SH_LABELS = {
