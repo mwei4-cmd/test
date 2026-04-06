@@ -23,10 +23,9 @@ from googleapiclient.discovery import build
 # ── Google Sheet 設定 ──────────────────────────────────────────────────────────
 SCOPES   = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_ID  = os.environ.get("GOOGLE_SHEET_ID", "")
-SHEET_TAB = "Input"   # ← 改成你的分頁名稱
+SHEET_TAB = "Input"
 
 def _get_service():
-    """Service Account 直接建立 Sheets service，不需要使用者登入"""
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     if not sa_json:
         return None
@@ -45,13 +44,11 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ── Auth status（Service Account 不需要登入，永遠回傳 True）────────────────────
 @app.get("/auth/status")
 async def auth_status():
     svc = _get_service()
     return {"logged_in": svc is not None}
 
-# ── 讀取 C14:C20 的 Data Validation 選項 ──────────────────────────────────────
 @app.get("/sheet/dropdown_options")
 async def sheet_dropdown_options():
     svc = _get_service()
@@ -63,7 +60,6 @@ async def sheet_dropdown_options():
             ranges=[f"{SHEET_TAB}!C14:C20"],
             includeGridData=True,
         ).execute()
-
         rows = (result["sheets"][0]["data"][0].get("rowData") or [])
         options_per_row = []
         for row in rows:
@@ -71,30 +67,22 @@ async def sheet_dropdown_options():
             dv   = cell.get("dataValidation", {})
             vals = [v["userEnteredValue"] for v in dv.get("condition", {}).get("values", [])]
             options_per_row.append(vals)
-
         while len(options_per_row) < 7:
             options_per_row.append([])
-
         return {"options": options_per_row}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# ── 寫入 Sheet + 讀回計算結果 ─────────────────────────────────────────────────
 @app.post("/sheet/calculate")
 async def sheet_calculate(request: Request):
     import traceback
     svc = _get_service()
     if not svc:
         return JSONResponse({"error": "Service Account 未設定"}, status_code=401)
-
     body = await request.json()
     print(f"[Sheet] body received: {body}")
-
     try:
         sheets = svc.spreadsheets()
-        print(f"[Sheet] SHEET_ID={SHEET_ID}, SHEET_TAB={SHEET_TAB}")
-
-        # ── 寫入 B11:J11 ──────────────────────────────────────────
         sheets.values().batchUpdate(
             spreadsheetId=SHEET_ID,
             body={
@@ -112,9 +100,6 @@ async def sheet_calculate(request: Request):
                 ]
             }
         ).execute()
-        print(f"[Sheet] B11:J11 written")
-
-        # ── 寫入 C14:C20 逐格 ─────────────────────────────────────
         for cell, key in [("C14","C14"),("C15","C15"),("C16","C16"),
                            ("C17","C17"),("C18","C18"),("C19","C19"),("C20","C20")]:
             val = body.get(key, "")
@@ -129,23 +114,15 @@ async def sheet_calculate(request: Request):
                 ).execute()
             except Exception as cell_err:
                 print(f"[Sheet] {cell} write failed: {cell_err}")
-        print(f"[Sheet] C14:C20 written")
-
         time.sleep(1.5)
-
-        # ── 讀回 C27, C28 ─────────────────────────────────────────
         result = sheets.values().batchGet(
             spreadsheetId=SHEET_ID,
             ranges=[f"{SHEET_TAB}!C27", f"{SHEET_TAB}!C28"],
         ).execute()
-        print(f"[Sheet] read result: {result}")
-
         vr  = result.get("valueRanges", [])
         c27 = vr[0]["values"][0][0] if vr[0].get("values") else ""
         c28 = vr[1]["values"][0][0] if vr[1].get("values") else ""
-
         return {"C27": c27, "C28": c28}
-
     except Exception as e:
         tb = traceback.format_exc()
         print(f"[Sheet] ERROR:\n{tb}")
@@ -455,24 +432,19 @@ def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
     if len(fp) < 2:
         return 0.0, 0.0, None
 
-    # 用 bounding box 左下角排序，找最左下的零件為 anchor
     sorted_by_pos = sorted(fp, key=lambda p: (round(p.bounds[1], 1), round(p.bounds[0], 1)))
     anchor = sorted_by_pos[0]
     ax1, ay1, ax2, ay2 = anchor.bounds
     acx, acy = anchor.centroid.x, anchor.centroid.y
 
     if "Nesting" in mode:
-        # 同格 B：centroid 最近的那個（排除自己）
         others = [p for p in fp if p is not anchor]
         nearest = min(others, key=lambda p:
             (p.centroid.x - acx)**2 + (p.centroid.y - acy)**2)
         nest_gap = round(anchor.distance(nearest), 3)
 
-        # 右邊相鄰格的 A：x 方向最近且 y centroid 接近 anchor 的
-        # 用 bsw 估計，找 centroid.x 在 acx + bsw*0.5 ~ acx + bsw*1.5 之間
         right_candidates = [p for p in fp
-                           if p is not anchor
-                           and p is not nearest
+                           if p is not anchor and p is not nearest
                            and p.centroid.x > ax2
                            and abs(p.centroid.y - acy) < bsh * 0.4]
         if right_candidates:
@@ -481,10 +453,8 @@ def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
         else:
             gap_x = nest_gap
 
-        # 上方相鄰格的 A
         up_candidates = [p for p in fp
-                        if p is not anchor
-                        and p is not nearest
+                        if p is not anchor and p is not nearest
                         and p.centroid.y > ay2
                         and abs(p.centroid.x - acx) < bsw * 0.4]
         if up_candidates:
@@ -496,20 +466,16 @@ def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
         return gap_x, gap_y, nest_gap
 
     elif "V-Cut" in mode:
-        # 右邊相鄰
         right_candidates = [p for p in fp
-                           if p is not anchor
-                           and p.centroid.x > ax2
+                           if p is not anchor and p.centroid.x > ax2
                            and abs(p.centroid.y - acy) < bsh * 0.4]
         gap_x = 0.0
         if right_candidates:
             right = min(right_candidates, key=lambda p: p.centroid.x)
             gap_x = round(right.bounds[0] - ax2, 3)
 
-        # 上方相鄰
         up_candidates = [p for p in fp
-                        if p is not anchor
-                        and p.centroid.y > ay2
+                        if p is not anchor and p.centroid.y > ay2
                         and abs(p.centroid.x - acx) < bsw * 0.4]
         gap_y = 0.0
         if up_candidates:
@@ -520,8 +486,7 @@ def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
 
     else:  # Matrix
         right_candidates = [p for p in fp
-                           if p is not anchor
-                           and p.centroid.x > ax2
+                           if p is not anchor and p.centroid.x > ax2
                            and abs(p.centroid.y - acy) < bsh * 0.4]
         gap_x = 0.0
         if right_candidates:
@@ -529,8 +494,7 @@ def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
             gap_x = round(right.bounds[0] - ax2, 3)
 
         up_candidates = [p for p in fp
-                        if p is not anchor
-                        and p.centroid.y > ay2
+                        if p is not anchor and p.centroid.y > ay2
                         and abs(p.centroid.x - acx) < bsw * 0.4]
         gap_y = 0.0
         if up_candidates:
@@ -619,6 +583,8 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
         polys_data.append({"exterior": ext, "holes": holes, "ax": ax, "ay": ay, "ang": ang})
 
     return fps, stats, polys_data, compw, comph
+
+
 def calculate_bridge(data, lines, connectors):
     gap_half = 1.75
     l1 = lines[data['idx1']]
@@ -690,6 +656,84 @@ def calculate_bridge(data, lines, connectors):
     }
     new_connectors = list(connectors) + [connector]
     return new_lines, new_connectors
+
+
+# ── Propagate Bridge Logic ─────────────────────────────────────────────────────
+def propagate_bridge_nesting(connectors, fps, bsw, bsh):
+    """
+    Nesting mode: replicate bridge patterns from the first grid cell (pair A+B)
+    to all other grid cells (pairs), using the step vector (bsw, bsh).
+
+    fps layout in nesting: [A0, B0, A1, B1, A2, B2, ...] for each cell.
+    bsw / bsh = step size in X and Y for each grid cell.
+    """
+    if not connectors or not fps:
+        return connectors
+
+    # Determine the reference origin: bounding box of the first two polys (cell 0)
+    fp_list = [p for p, a, f, c in fps]
+    if len(fp_list) < 2:
+        return connectors
+
+    # Reference cell centroid (cell 0 = first pair A+B)
+    ref_cx = (fp_list[0].centroid.x + fp_list[1].centroid.x) / 2
+    ref_cy = (fp_list[0].centroid.y + fp_list[1].centroid.y) / 2
+
+    # Build grid offsets for all pairs (step by bsw, bsh)
+    # fps in nesting mode: pairs of [A, B] interleaved → group by 2
+    pair_count = len(fp_list) // 2
+    pair_centroids = []
+    for i in range(pair_count):
+        pa = fp_list[i * 2]
+        pb = fp_list[i * 2 + 1]
+        pcx = (pa.centroid.x + pb.centroid.x) / 2
+        pcy = (pa.centroid.y + pb.centroid.y) / 2
+        pair_centroids.append((pcx, pcy))
+
+    all_connectors = []
+    for pcx, pcy in pair_centroids:
+        dx = pcx - ref_cx
+        dy = pcy - ref_cy
+        for c in connectors:
+            all_connectors.append({
+                'type': c['type'],
+                'lx': c['lx'] + dx, 'ly': c['ly'] + dy,
+                'rx': c['rx'] + dx, 'ry': c['ry'] + dy,
+                'r': c['r'], 'ang': c['ang']
+            })
+
+    return all_connectors
+
+
+def propagate_bridge_matrix_vcut(connectors, fps):
+    """
+    Matrix / V-Cut mode: replicate bridge patterns from the first part
+    to all other parts, using each part's centroid offset from the first.
+    """
+    if not connectors or not fps:
+        return connectors
+
+    fp_list = [p for p, a, f, c in fps]
+    if len(fp_list) < 2:
+        return connectors
+
+    ref_cx = fp_list[0].centroid.x
+    ref_cy = fp_list[0].centroid.y
+
+    all_connectors = []
+    for poly in fp_list:
+        dx = poly.centroid.x - ref_cx
+        dy = poly.centroid.y - ref_cy
+        for c in connectors:
+            all_connectors.append({
+                'type': c['type'],
+                'lx': c['lx'] + dx, 'ly': c['ly'] + dy,
+                'rx': c['rx'] + dx, 'ry': c['ry'] + dy,
+                'r': c['r'], 'ang': c['ang']
+            })
+
+    return all_connectors
+
 
 # ── REST endpoints ─────────────────────────────────────────────────────────────
 @app.get("/")
@@ -909,6 +953,54 @@ async def reset_bridge():
                            "type":"frame","kind":"line"})
     SESSION['interactive_lines'] = lines
     return {"ok":True, "lines":lines, "connectors":[]}
+
+
+# ── NEW: Propagate Bridge endpoint ────────────────────────────────────────────
+@app.post("/propagate_bridge")
+async def propagate_bridge():
+    """
+    Propagate the current set of manually-placed bridges (manual_connectors)
+    to all copies in the panel:
+
+    - Nesting mode:  replicate per pair (A+B cell) → all grid cells
+    - Matrix/V-Cut:  replicate per single part → all parts
+    """
+    connectors = SESSION.get('manual_connectors', [])
+    fps        = SESSION.get('final_polys_with_info', [])
+    mode       = SESSION.get('last_params', {}).get('mode', '')
+    bsw        = SESSION.get('best_step_w', 0)
+    bsh        = SESSION.get('best_step_h', 0)
+
+    if not connectors:
+        return JSONResponse({"ok": False, "error": "No bridges to propagate"}, status_code=400)
+    if not fps:
+        return JSONResponse({"ok": False, "error": "No layout available"}, status_code=400)
+
+    try:
+        if "Nesting" in mode:
+            all_connectors = propagate_bridge_nesting(connectors, fps, bsw, bsh)
+            copies = len(fps) // 2  # number of grid cells (pairs)
+        else:
+            all_connectors = propagate_bridge_matrix_vcut(connectors, fps)
+            copies = len(fps)
+
+        SESSION['manual_connectors'] = all_connectors
+        # lines stay the same — only connectors are added
+        serialized = [
+            {"lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
+             "r": c['r'], "ang": c['ang']}
+            for c in all_connectors
+        ]
+        return {
+            "ok": True,
+            "lines": SESSION['interactive_lines'],
+            "connectors": serialized,
+            "copies": copies,
+        }
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
 
 @app.post("/adjust")
 async def adjust(data: dict):
