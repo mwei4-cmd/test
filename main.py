@@ -659,42 +659,85 @@ def calculate_bridge(data, lines, connectors):
 
 
 # ── Propagate Bridge Logic ─────────────────────────────────────────────────────
-def propagate_bridge_nesting(connectors, fps, bsw, bsh):
+
+def _connector_midpoint(c):
+    """Return the geometric midpoint of a connector (sandglass centre)."""
+    return (c['lx'] + c['rx']) / 2, (c['ly'] + c['ry']) / 2
+
+
+def _find_owning_pair(connector, fp_list):
     """
-    Nesting mode: replicate bridge patterns from the first grid cell (pair A+B)
-    to all other grid cells (pairs), using the step vector (bsw, bsh).
-
-    fps layout in nesting: [A0, B0, A1, B1, A2, B2, ...] for each cell.
-    bsw / bsh = step size in X and Y for each grid cell.
+    Nesting mode: fp_list = [A0, B0, A1, B1, ...].
+    Find which pair index (0-based) the connector midpoint is closest to,
+    measured as distance to the pair's bounding-box union centroid.
+    Returns pair_index (int).
     """
-    if not connectors or not fps:
-        return connectors
-
-    # Determine the reference origin: bounding box of the first two polys (cell 0)
-    fp_list = [p for p, a, f, c in fps]
-    if len(fp_list) < 2:
-        return connectors
-
-    # Reference cell centroid (cell 0 = first pair A+B)
-    ref_cx = (fp_list[0].centroid.x + fp_list[1].centroid.x) / 2
-    ref_cy = (fp_list[0].centroid.y + fp_list[1].centroid.y) / 2
-
-    # Build grid offsets for all pairs (step by bsw, bsh)
-    # fps in nesting mode: pairs of [A, B] interleaved → group by 2
+    mx, my = _connector_midpoint(connector)
     pair_count = len(fp_list) // 2
-    pair_centroids = []
+    best_idx, best_dist = 0, float('inf')
     for i in range(pair_count):
         pa = fp_list[i * 2]
         pb = fp_list[i * 2 + 1]
         pcx = (pa.centroid.x + pb.centroid.x) / 2
         pcy = (pa.centroid.y + pb.centroid.y) / 2
-        pair_centroids.append((pcx, pcy))
+        d = (mx - pcx) ** 2 + (my - pcy) ** 2
+        if d < best_dist:
+            best_dist = d
+            best_idx = i
+    return best_idx
+
+
+def _find_owning_poly(connector, fp_list):
+    """
+    Matrix / V-Cut mode: find which poly index the connector midpoint is
+    closest to (by centroid distance).
+    Returns poly_index (int).
+    """
+    mx, my = _connector_midpoint(connector)
+    best_idx, best_dist = 0, float('inf')
+    for i, poly in enumerate(fp_list):
+        pcx, pcy = poly.centroid.x, poly.centroid.y
+        d = (mx - pcx) ** 2 + (my - pcy) ** 2
+        if d < best_dist:
+            best_dist = d
+            best_idx = i
+    return best_idx
+
+
+def propagate_bridge_nesting(connectors, fps):
+    """
+    Nesting mode: for each connector, detect which pair (A+B cell) it belongs
+    to, then replicate it to all OTHER pairs using the centroid offset.
+
+    fp_list layout: [A0, B0, A1, B1, A2, B2, ...]
+    """
+    if not connectors or not fps:
+        return connectors
+
+    fp_list = [p for p, a, f, c in fps]
+    if len(fp_list) < 2:
+        return connectors
+
+    pair_count = len(fp_list) // 2
+
+    # Pre-compute pair centroids
+    pair_cx = []
+    pair_cy = []
+    for i in range(pair_count):
+        pa = fp_list[i * 2]
+        pb = fp_list[i * 2 + 1]
+        pair_cx.append((pa.centroid.x + pb.centroid.x) / 2)
+        pair_cy.append((pa.centroid.y + pb.centroid.y) / 2)
 
     all_connectors = []
-    for pcx, pcy in pair_centroids:
-        dx = pcx - ref_cx
-        dy = pcy - ref_cy
-        for c in connectors:
+    for c in connectors:
+        src_pair = _find_owning_pair(c, fp_list)
+        ref_cx, ref_cy = pair_cx[src_pair], pair_cy[src_pair]
+
+        # Replicate to every pair (including the source pair itself)
+        for i in range(pair_count):
+            dx = pair_cx[i] - ref_cx
+            dy = pair_cy[i] - ref_cy
             all_connectors.append({
                 'type': c['type'],
                 'lx': c['lx'] + dx, 'ly': c['ly'] + dy,
@@ -707,8 +750,8 @@ def propagate_bridge_nesting(connectors, fps, bsw, bsh):
 
 def propagate_bridge_matrix_vcut(connectors, fps):
     """
-    Matrix / V-Cut mode: replicate bridge patterns from the first part
-    to all other parts, using each part's centroid offset from the first.
+    Matrix / V-Cut mode: for each connector, detect which poly it belongs to,
+    then replicate it to all OTHER polys using the centroid offset.
     """
     if not connectors or not fps:
         return connectors
@@ -717,14 +760,16 @@ def propagate_bridge_matrix_vcut(connectors, fps):
     if len(fp_list) < 2:
         return connectors
 
-    ref_cx = fp_list[0].centroid.x
-    ref_cy = fp_list[0].centroid.y
-
     all_connectors = []
-    for poly in fp_list:
-        dx = poly.centroid.x - ref_cx
-        dy = poly.centroid.y - ref_cy
-        for c in connectors:
+    for c in connectors:
+        src_idx = _find_owning_poly(c, fp_list)
+        ref_cx = fp_list[src_idx].centroid.x
+        ref_cy = fp_list[src_idx].centroid.y
+
+        # Replicate to every poly (including the source poly itself)
+        for poly in fp_list:
+            dx = poly.centroid.x - ref_cx
+            dy = poly.centroid.y - ref_cy
             all_connectors.append({
                 'type': c['type'],
                 'lx': c['lx'] + dx, 'ly': c['ly'] + dy,
@@ -968,8 +1013,6 @@ async def propagate_bridge():
     connectors = SESSION.get('manual_connectors', [])
     fps        = SESSION.get('final_polys_with_info', [])
     mode       = SESSION.get('last_params', {}).get('mode', '')
-    bsw        = SESSION.get('best_step_w', 0)
-    bsh        = SESSION.get('best_step_h', 0)
 
     if not connectors:
         return JSONResponse({"ok": False, "error": "No bridges to propagate"}, status_code=400)
@@ -978,8 +1021,8 @@ async def propagate_bridge():
 
     try:
         if "Nesting" in mode:
-            all_connectors = propagate_bridge_nesting(connectors, fps, bsw, bsh)
-            copies = len(fps) // 2  # number of grid cells (pairs)
+            all_connectors = propagate_bridge_nesting(connectors, fps)
+            copies = len(fps) // 2
         else:
             all_connectors = propagate_bridge_matrix_vcut(connectors, fps)
             copies = len(fps)
