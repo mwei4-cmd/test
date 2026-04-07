@@ -145,17 +145,30 @@ def get_full_polygon_with_holes(file_path, target_doc=None):
     all_polys = []
     entities = msp.query('*[layer=="BOARD_OUTLINE_00"]')
     if not entities:
-        entities = msp.query('LWPOLYLINE POLYLINE CIRCLE ELLIPSE SPLINE')
+        entities = msp.query('LWPOLYLINE POLYLINE CIRCLE ELLIPSE SPLINE ARC LINE')
     for entity in entities:
         try:
             if entity.dxftype() == 'CIRCLE':
                 c = entity.dxf.center
                 poly = Point(c.x, c.y).buffer(entity.dxf.radius, quad_segs=32)
             else:
-                pts = list(make_path(entity).flattening(distance=0.05))
+                try:
+                    pts = list(make_path(entity).flattening(distance=0.005))
+                except Exception:
+                    pts = []
+
+                if len(pts) >= 3 and entity.dxftype() == 'SPLINE':
+                    p0, p1 = pts[0], pts[-1]
+                    if (p0.x - p1.x)**2 + (p0.y - p1.y)**2 > 0.001:
+                        pts = pts + [pts[0]]
+
                 if len(pts) < 3: continue
-                poly = Polygon([(p.x, p.y) for p in pts])
-                if not poly.is_valid: poly = poly.buffer(0)
+
+                try:
+                    poly = Polygon([(p.x, p.y) for p in pts])
+                    if not poly.is_valid: poly = poly.buffer(0)
+                except Exception:
+                    continue
             if poly.is_valid and not poly.is_empty and poly.area > 0.01:
                 all_polys.append(poly)
         except: continue
