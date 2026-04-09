@@ -1157,24 +1157,119 @@ async def reset_bridge():
 
 @app.post("/propagate_bridge")
 async def propagate_bridge():
-    connectors = SESSION.get('manual_connectors', [])
-    fps        = SESSION.get('final_polys_with_info', [])
-    mode       = SESSION.get('last_params', {}).get('mode', '')
+    """
+    Propagate bridges to all copies.
+    For each source connector, compute the offset to every other poly/pair,
+    then apply calculate_bridge_from_connector() to actually cut the lines
+    and record full metadata (id, cut_ids, orig_l1, orig_l2).
+    """
+    src_connectors = SESSION.get('manual_connectors', [])
+    fps            = SESSION.get('final_polys_with_info', [])
+    mode           = SESSION.get('last_params', {}).get('mode', '')
+    spacing        = float(SESSION.get('last_params', {}).get('spacing', 2.0))
+    r_arc          = max(spacing / 2, 0.1)
 
-    if not connectors:
+    if not src_connectors:
         return JSONResponse({"ok": False, "error": "No bridges to propagate"}, status_code=400)
     if not fps:
         return JSONResponse({"ok": False, "error": "No layout available"}, status_code=400)
 
     try:
+        fp_list = [p for p, a, f, c in fps]
+        cur_lines = list(SESSION['interactive_lines'])
+
+        # 從原始 connectors 出發，先 delete 已有的（避免重複），再重新套用 + propagate
+        # 最簡單可靠：重置 lines，從 SESSION 儲存的 src connectors 重新 apply 到所有 copy
+
+        # 計算每個 src connector 的偏移列表
+        offsets = []  # list of (dx, dy) per copy
         if "Nesting" in mode:
-            all_connectors = propagate_bridge_nesting(connectors, fps)
-            copies = len(fps) // 2
+            pair_count = len(fp_list) // 2
+            pair_cx = [(fp_list[i*2].centroid.x + fp_list[i*2+1].centroid.x)/2 for i in range(pair_count)]
+            pair_cy = [(fp_list[i*2].centroid.y + fp_list[i*2+1].centroid.y)/2 for i in range(pair_count)]
+            copies = pair_count
+            def get_offsets(c):
+                src = _find_owning_pair(c, fp_list)
+                return [(pair_cx[i]-pair_cx[src], pair_cy[i]-pair_cy[src]) for i in range(pair_count)]
         else:
-            all_connectors = propagate_bridge_matrix_vcut(connectors, fps)
-            copies = len(fps)
+            copies = len(fp_list)
+            def get_offsets(c):
+                src = _find_owning_poly(c, fp_list)
+                rcx, rcy = fp_list[src].centroid.x, fp_list[src].centroid.y
+                return [(p.centroid.x-rcx, p.centroid.y-rcy) for p in fp_list]
+
+        all_connectors = []
+
+        for src_c in src_connectors:
+            gap_half = math.sqrt((src_c['rx']-src_c['lx'])**2 + (src_c['ry']-src_c['ly'])**2) / 2
+            ang_rad  = math.radians(src_c['ang'])
+            ux, uy   = math.cos(ang_rad), math.sin(ang_rad)
+            # midpoint of src connector
+            smx = (src_c['lx'] + src_c['rx']) / 2
+            smy = (src_c['ly'] + src_c['ry']) / 2
+
+            for dx, dy in get_offsets(src_c):
+                nmx, nmy = smx + dx, smy + dy
+                nlx = nmx - ux * gap_half
+                nly = nmy - uy * gap_half
+                nrx = nmx + ux * gap_half
+                nry = nmy + uy * gap_half
+
+                # Find the two closest offset lines to cut
+                def dist_to_line(l, px, py):
+                    if l.get('kind') == 'arc': return float('inf')
+                    if l.get('type') not in ('offset',): return float('inf')
+                    x0,y0 = l['coords'][0]; x1,y1 = l['coords'][1]
+                    ddx,ddy = x1-x0, y1-y0
+                    d2 = ddx*ddx+ddy*ddy
+                    if d2 == 0: return math.sqrt((px-x0)**2+(py-y0)**2)
+                    t = max(0,min(1,((px-x0)*ddx+(py-y0)*ddy)/d2))
+                    return math.sqrt((px-(x0+t*ddx))**2+(py-(y0+t*ddy))**2)
+
+                # Find nearest offset line to each end of the new connector
+                thresh = gap_half * 4
+                cands_l = sorted(
+                    [(i,l) for i,l in enumerate(cur_lines)
+                     if l.get('type')=='offset' and dist_to_line(l,nlx,nly)<thresh],
+                    key=lambda x: dist_to_line(x[1],nlx,nly))
+                cands_r = sorted(
+                    [(i,l) for i,l in enumerate(cur_lines)
+                     if l.get('type')=='offset' and dist_to_line(l,nrx,nry)<thresh
+                     and (not cands_l or x[0]!=cands_l[0][0])],
+                    key=lambda x: dist_to_line(x[1],nrx,nry))
+
+                if cands_l and cands_r and cands_l[0][0] != cands_r[0][0]:
+                    idx1 = cands_l[0][0]
+                    idx2 = cands_r[0][0]
+                    pt1  = [nlx, nly]
+                    data_fake = {'idx1': idx1, 'idx2': idx2, 'pt1': pt1}
+                    try:
+                        cur_lines, new_conns = calculate_bridge(
+                            data_fake, cur_lines, all_connectors,
+                            gap_half=gap_half, r=r_arc)
+                        all_connectors = new_conns
+                    except Exception:
+                        # fallback: add connector without cutting
+                        all_connectors.append({
+                            'type': 'precise_sandglass_arc',
+                            'lx': nlx, 'ly': nly, 'rx': nrx, 'ry': nry,
+                            'r': r_arc, 'ang': src_c['ang'],
+                            'id': str(uuid.uuid4()),
+                            'cut_ids': [], 'orig_l1': None, 'orig_l2': None,
+                        })
+                else:
+                    # No offset lines found nearby — add connector only
+                    all_connectors.append({
+                        'type': 'precise_sandglass_arc',
+                        'lx': nlx, 'ly': nly, 'rx': nrx, 'ry': nry,
+                        'r': r_arc, 'ang': src_c['ang'],
+                        'id': str(uuid.uuid4()),
+                        'cut_ids': [], 'orig_l1': None, 'orig_l2': None,
+                    })
 
         SESSION['manual_connectors'] = all_connectors
+        SESSION['interactive_lines'] = cur_lines
+
         serialized = [
             {"id": c.get('id',''), "lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
              "r": c['r'], "ang": c['ang']}
@@ -1182,7 +1277,7 @@ async def propagate_bridge():
         ]
         return {
             "ok": True,
-            "lines": SESSION['interactive_lines'],
+            "lines": cur_lines,
             "connectors": serialized,
             "copies": copies,
         }
