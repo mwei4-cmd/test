@@ -1159,9 +1159,9 @@ async def reset_bridge():
 async def propagate_bridge():
     """
     Propagate bridges to all copies.
-    For each source connector, compute the offset to every other poly/pair,
-    then apply calculate_bridge_from_connector() to actually cut the lines
-    and record full metadata (id, cut_ids, orig_l1, orig_l2).
+    Uses orig_l1/orig_l2 from each source connector to precisely find the
+    corresponding lines in each copy (by translating the original line coords
+    by the poly centroid offset), then cuts exactly the right lines.
     """
     src_connectors = SESSION.get('manual_connectors', [])
     fps            = SESSION.get('final_polys_with_info', [])
@@ -1176,13 +1176,8 @@ async def propagate_bridge():
 
     try:
         fp_list = [p for p, a, f, c in fps]
-        cur_lines = list(SESSION['interactive_lines'])
 
-        # 從原始 connectors 出發，先 delete 已有的（避免重複），再重新套用 + propagate
-        # 最簡單可靠：重置 lines，從 SESSION 儲存的 src connectors 重新 apply 到所有 copy
-
-        # 計算每個 src connector 的偏移列表
-        offsets = []  # list of (dx, dy) per copy
+        # Build offset list per source connector
         if "Nesting" in mode:
             pair_count = len(fp_list) // 2
             pair_cx = [(fp_list[i*2].centroid.x + fp_list[i*2+1].centroid.x)/2 for i in range(pair_count)]
@@ -1198,70 +1193,84 @@ async def propagate_bridge():
                 rcx, rcy = fp_list[src].centroid.x, fp_list[src].centroid.y
                 return [(p.centroid.x-rcx, p.centroid.y-rcy) for p in fp_list]
 
+        cur_lines = list(SESSION['interactive_lines'])
         all_connectors = []
+
+        def line_coords_match(l, target_coords, tol=0.5):
+            """Check if a line's coords match target coords within tolerance."""
+            if l.get('kind') == 'arc': return False
+            lc = l.get('coords', [])
+            if len(lc) < 2: return False
+            tc = target_coords
+            # Check both endpoint orderings
+            d0 = math.sqrt((lc[0][0]-tc[0][0])**2+(lc[0][1]-tc[0][1])**2)
+            d1 = math.sqrt((lc[1][0]-tc[1][0])**2+(lc[1][1]-tc[1][1])**2)
+            d0r = math.sqrt((lc[0][0]-tc[1][0])**2+(lc[0][1]-tc[1][1])**2)
+            d1r = math.sqrt((lc[1][0]-tc[0][0])**2+(lc[1][1]-tc[0][1])**2)
+            return (d0 < tol and d1 < tol) or (d0r < tol and d1r < tol)
 
         for src_c in src_connectors:
             gap_half = math.sqrt((src_c['rx']-src_c['lx'])**2 + (src_c['ry']-src_c['ly'])**2) / 2
-            ang_rad  = math.radians(src_c['ang'])
-            ux, uy   = math.cos(ang_rad), math.sin(ang_rad)
-            # midpoint of src connector
+            orig_l1 = src_c.get('orig_l1')
+            orig_l2 = src_c.get('orig_l2')
+            # pt1 = the point on orig_l1 where the bridge was placed
+            # recover it from connector lx/ly (which is the gap_half offset from midpoint)
             smx = (src_c['lx'] + src_c['rx']) / 2
             smy = (src_c['ly'] + src_c['ry']) / 2
 
             for dx, dy in get_offsets(src_c):
-                nmx, nmy = smx + dx, smy + dy
-                nlx = nmx - ux * gap_half
-                nly = nmy - uy * gap_half
-                nrx = nmx + ux * gap_half
-                nry = nmy + uy * gap_half
+                # Build expected coords for orig_l1 and orig_l2 at this copy
+                if orig_l1 and orig_l1.get('coords'):
+                    expected_l1_coords = [
+                        [orig_l1['coords'][0][0]+dx, orig_l1['coords'][0][1]+dy],
+                        [orig_l1['coords'][1][0]+dx, orig_l1['coords'][1][1]+dy],
+                    ]
+                else:
+                    expected_l1_coords = None
 
-                # Find the two closest offset lines to cut
-                def dist_to_line(l, px, py):
-                    if l.get('kind') == 'arc': return float('inf')
-                    if l.get('type') not in ('offset',): return float('inf')
-                    x0,y0 = l['coords'][0]; x1,y1 = l['coords'][1]
-                    ddx,ddy = x1-x0, y1-y0
-                    d2 = ddx*ddx+ddy*ddy
-                    if d2 == 0: return math.sqrt((px-x0)**2+(py-y0)**2)
-                    t = max(0,min(1,((px-x0)*ddx+(py-y0)*ddy)/d2))
-                    return math.sqrt((px-(x0+t*ddx))**2+(py-(y0+t*ddy))**2)
+                if orig_l2 and orig_l2.get('coords'):
+                    expected_l2_coords = [
+                        [orig_l2['coords'][0][0]+dx, orig_l2['coords'][0][1]+dy],
+                        [orig_l2['coords'][1][0]+dx, orig_l2['coords'][1][1]+dy],
+                    ]
+                else:
+                    expected_l2_coords = None
 
-                # Find nearest offset line to each end of the new connector
-                thresh = gap_half * 4
-                cands_l = sorted(
-                    [(i,l) for i,l in enumerate(cur_lines)
-                     if l.get('type')=='offset' and dist_to_line(l,nlx,nly)<thresh],
-                    key=lambda x: dist_to_line(x[1],nlx,nly))
-                cands_r = sorted(
-                    [(i,l) for i,l in enumerate(cur_lines)
-                     if l.get('type')=='offset' and dist_to_line(l,nrx,nry)<thresh
-                     and (not cands_l or i!=cands_l[0][0])],
-                    key=lambda x: dist_to_line(x[1],nrx,nry))
+                # Find matching lines in cur_lines
+                idx1 = idx2 = None
+                if expected_l1_coords:
+                    for i, l in enumerate(cur_lines):
+                        if line_coords_match(l, expected_l1_coords):
+                            idx1 = i; break
+                if expected_l2_coords:
+                    for i, l in enumerate(cur_lines):
+                        if i != idx1 and line_coords_match(l, expected_l2_coords):
+                            idx2 = i; break
 
-                if cands_l and cands_r and cands_l[0][0] != cands_r[0][0]:
-                    idx1 = cands_l[0][0]
-                    idx2 = cands_r[0][0]
-                    pt1  = [nlx, nly]
+                if idx1 is not None and idx2 is not None:
+                    pt1 = [smx + dx, smy + dy]
                     data_fake = {'idx1': idx1, 'idx2': idx2, 'pt1': pt1}
                     try:
                         cur_lines, new_conns = calculate_bridge(
                             data_fake, cur_lines, all_connectors,
                             gap_half=gap_half, r=r_arc)
                         all_connectors = new_conns
-                    except Exception:
-                        # fallback: add connector without cutting
+                    except Exception as ex:
+                        print(f"[propagate] calculate_bridge failed: {ex}")
                         all_connectors.append({
                             'type': 'precise_sandglass_arc',
-                            'lx': nlx, 'ly': nly, 'rx': nrx, 'ry': nry,
+                            'lx': src_c['lx']+dx, 'ly': src_c['ly']+dy,
+                            'rx': src_c['rx']+dx, 'ry': src_c['ry']+dy,
                             'r': r_arc, 'ang': src_c['ang'],
                             'id': str(uuid.uuid4()),
                             'cut_ids': [], 'orig_l1': None, 'orig_l2': None,
                         })
                 else:
-                    # No offset lines found nearby — add connector only
+                    # Fallback: just shift the connector geometry
                     all_connectors.append({
                         'type': 'precise_sandglass_arc',
-                        'lx': nlx, 'ly': nly, 'rx': nrx, 'ry': nry,
+                        'lx': src_c['lx']+dx, 'ly': src_c['ly']+dy,
+                        'rx': src_c['rx']+dx, 'ry': src_c['ry']+dy,
                         'r': r_arc, 'ang': src_c['ang'],
                         'id': str(uuid.uuid4()),
                         'cut_ids': [], 'orig_l1': None, 'orig_l2': None,
