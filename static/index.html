@@ -300,7 +300,7 @@ input[type=range]{
   margin-bottom:8px;
   line-height:1.4;
 }
-#orient-notice::before{content:'⇄';font-size:14px;flex-shrink:0;}
+#orient-notice::before{content:'';font-size:14px;flex-shrink:0;}
 
 /* ── Nest info bar ── */
 #nest-infobar{
@@ -1057,7 +1057,7 @@ async function runNesting(){
           document.getElementById('pw').value = returnedW;
           document.getElementById('ph').value = returnedH;
           notice.style.display = 'flex';
-          notice.textContent = '⇄ Panel W↔H auto-swapped: ' +
+          notice.textContent = 'Panel W↔H auto-swapped: ' +
             origW + '×' + origH + ' → ' + returnedW + '×' + returnedH + ' mm';
         } else {
           notice.style.display = 'none';
