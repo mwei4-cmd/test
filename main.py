@@ -216,7 +216,11 @@ def refine_position(poly_a, poly_b, init_dx, init_dy, target_dist):
             no_improve_count = 0
     return best_dx, best_dy, best_b, best_area
 
-def run_nesting(raw_poly, params, progress_cb=None):
+def _run_nesting_single(raw_poly, params, progress_cb=None):
+    """
+    Core nesting logic for a single panel orientation.
+    Returns (best_layout, bsw, bsh, bcc, bcr, candidates_top3).
+    """
     cw, ch = params["panel_w"], params["panel_h"]
     lb, rb, ub, db = params["left"], params["right"], params["top"], params["bottom"]
     spacing = params["spacing"]
@@ -341,7 +345,54 @@ def run_nesting(raw_poly, params, progress_cb=None):
 
     return best_layout, bsw, bsh, bcc, bcr, candidates_top3
 
-def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
+
+# ── FIX 1: run_nesting tries both panel orientations and returns the best ──────
+def run_nesting(raw_poly, params, progress_cb=None):
+    """
+    Try both panel orientations (W×H and H×W) and return the result
+    that fits the most parts.  If the dimensions are identical the
+    second run is skipped.
+    """
+    # --- orientation A: as given ---
+    def cb_a(pct):
+        if progress_cb: progress_cb(pct * 0.5)          # first half of progress
+
+    result_a = _run_nesting_single(raw_poly, params, cb_a)
+    count_a  = len(result_a[0])
+
+    # --- orientation B: swap W and H ---
+    swapped = (
+        abs(params["panel_w"] - params["panel_h"]) > 0.01   # only if not square
+    )
+    result_b = None
+    count_b  = -1
+    if swapped:
+        params_b = dict(params)
+        params_b["panel_w"] = params["panel_h"]
+        params_b["panel_h"] = params["panel_w"]
+
+        def cb_b(pct):
+            if progress_cb: progress_cb(0.5 + pct * 0.5)  # second half
+
+        result_b = _run_nesting_single(raw_poly, params_b, cb_b)
+        count_b  = len(result_b[0])
+    else:
+        if progress_cb: progress_cb(1.0)
+
+    # --- pick winner ---
+    if result_b is not None and count_b > count_a:
+        print(f"[Nesting] Swapped orientation wins: {count_b} > {count_a} pcs")
+        # patch params so downstream code sees the winning panel dimensions
+        params["panel_w"] = params_b["panel_w"]
+        params["panel_h"] = params_b["panel_h"]
+        return result_b
+    else:
+        print(f"[Nesting] Original orientation wins: {count_a} pcs (swapped={count_b})")
+        return result_a
+
+
+def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0):
+    # ── FIX 2: offset_dist is now passed in (defaults to 2.0 for safety) ──────
     import math as _math
 
     lines = []
@@ -430,8 +481,9 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig):
                                "coords":[[round(ec[i][0],4),round(ec[i][1],4)],
                                          [round(ec[i+1][0],4),round(ec[i+1][1],4)]]})
 
+        # ── FIX 2: use offset_dist instead of hardcoded 2 ─────────────────────
         try:
-            op = poly.buffer(2, join_style=2)
+            op = poly.buffer(offset_dist, join_style=2)
             oc = list(op.exterior.coords)
             for i in range(len(oc)-1):
                 lines.append({"id":str(uuid.uuid4()), "type":"offset", "kind":"line",
@@ -500,7 +552,7 @@ def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
     else:  # Matrix
         right_candidates = [p for p in fp
                            if p is not anchor and p.centroid.x > ax2
-                           and abs(p.centroid.y - acy) < bsh * 0.4]
+                           and abs(p.centroid.y - acy) < bsw * 0.4]
         gap_x = 0.0
         if right_candidates:
             right = min(right_candidates, key=lambda p: p.centroid.x)
@@ -674,17 +726,10 @@ def calculate_bridge(data, lines, connectors):
 # ── Propagate Bridge Logic ─────────────────────────────────────────────────────
 
 def _connector_midpoint(c):
-    """Return the geometric midpoint of a connector (sandglass centre)."""
     return (c['lx'] + c['rx']) / 2, (c['ly'] + c['ry']) / 2
 
 
 def _find_owning_pair(connector, fp_list):
-    """
-    Nesting mode: fp_list = [A0, B0, A1, B1, ...].
-    Find which pair index (0-based) the connector midpoint is closest to,
-    measured as distance to the pair's bounding-box union centroid.
-    Returns pair_index (int).
-    """
     mx, my = _connector_midpoint(connector)
     pair_count = len(fp_list) // 2
     best_idx, best_dist = 0, float('inf')
@@ -701,11 +746,6 @@ def _find_owning_pair(connector, fp_list):
 
 
 def _find_owning_poly(connector, fp_list):
-    """
-    Matrix / V-Cut mode: find which poly index the connector midpoint is
-    closest to (by centroid distance).
-    Returns poly_index (int).
-    """
     mx, my = _connector_midpoint(connector)
     best_idx, best_dist = 0, float('inf')
     for i, poly in enumerate(fp_list):
@@ -718,12 +758,6 @@ def _find_owning_poly(connector, fp_list):
 
 
 def propagate_bridge_nesting(connectors, fps):
-    """
-    Nesting mode: for each connector, detect which pair (A+B cell) it belongs
-    to, then replicate it to all OTHER pairs using the centroid offset.
-
-    fp_list layout: [A0, B0, A1, B1, A2, B2, ...]
-    """
     if not connectors or not fps:
         return connectors
 
@@ -733,7 +767,6 @@ def propagate_bridge_nesting(connectors, fps):
 
     pair_count = len(fp_list) // 2
 
-    # Pre-compute pair centroids
     pair_cx = []
     pair_cy = []
     for i in range(pair_count):
@@ -747,7 +780,6 @@ def propagate_bridge_nesting(connectors, fps):
         src_pair = _find_owning_pair(c, fp_list)
         ref_cx, ref_cy = pair_cx[src_pair], pair_cy[src_pair]
 
-        # Replicate to every pair (including the source pair itself)
         for i in range(pair_count):
             dx = pair_cx[i] - ref_cx
             dy = pair_cy[i] - ref_cy
@@ -762,10 +794,6 @@ def propagate_bridge_nesting(connectors, fps):
 
 
 def propagate_bridge_matrix_vcut(connectors, fps):
-    """
-    Matrix / V-Cut mode: for each connector, detect which poly it belongs to,
-    then replicate it to all OTHER polys using the centroid offset.
-    """
     if not connectors or not fps:
         return connectors
 
@@ -779,7 +807,6 @@ def propagate_bridge_matrix_vcut(connectors, fps):
         ref_cx = fp_list[src_idx].centroid.x
         ref_cy = fp_list[src_idx].centroid.y
 
-        # Replicate to every poly (including the source poly itself)
         for poly in fp_list:
             dx = poly.centroid.x - ref_cx
             dy = poly.centroid.y - ref_cy
@@ -854,20 +881,23 @@ async def nest(params: dict):
             SESSION['doc_out'] = doc_out
             SESSION['geo_block_name'] = block_name
 
-            bl, bsw, bsh, bcc, bcr, top3 = run_nesting(raw, params, progress_cb)
+            # ── FIX 1: run_nesting now tries both orientations internally ──────
+            # params dict may be mutated by run_nesting to reflect winning dims
+            params_copy = dict(params)
+            bl, bsw, bsh, bcc, bcr, top3 = run_nesting(raw, params_copy, progress_cb)
             if not bl:
                 progress_queue.put(("error", "無法排版"))
                 return
 
             fps, stats, polys_data, compw, comph = build_output_data(
-                bl, bsw, bsh, bcc, bcr, params, block_name, doc_out, raw)
+                bl, bsw, bsh, bcc, bcr, params_copy, block_name, doc_out, raw)
 
             SESSION['best_layout'] = bl
             SESSION['best_step_w'] = bsw
             SESSION['best_step_h'] = bsh
             SESSION['best_count_col'] = bcc
             SESSION['best_count_row'] = bcr
-            SESSION['last_params'] = dict(params)
+            SESSION['last_params'] = dict(params_copy)
             SESSION['final_polys_with_info'] = fps
             SESSION['stats'] = stats
             SESSION['compressed_w'] = compw
@@ -876,10 +906,16 @@ async def nest(params: dict):
             SESSION['manual_connectors'] = []
             SESSION['lines_history'] = []
 
+            # ── FIX 2: pass spacing to build_interactive_lines_from_dxf ────────
+            offset_dist = float(params_copy.get("spacing", 2.0))
+            # For V-Cut spacing is 0 — use a sensible minimum for the offset line
+            if offset_dist <= 0:
+                offset_dist = 0.5
+
             src_path = SESSION.get('_src_dxf_path')
             cx_cy = SESSION.get('_orig_cx_cy', (0.0, 0.0))
             if src_path and os.path.exists(src_path):
-                lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy)
+                lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy, offset_dist)
             else:
                 lines = []
                 for poly, ang, _, _ in fps:
@@ -894,8 +930,9 @@ async def nest(params: dict):
                             lines.append({"id":str(uuid.uuid4()),
                                           "coords":[[hc[i][0],hc[i][1]],[hc[i+1][0],hc[i+1][1]]],
                                           "type":"hole","kind":"line"})
+                    # ── FIX 2: dynamic offset in fallback path ─────────────────
                     try:
-                        op = poly.buffer(2, join_style=2)
+                        op = poly.buffer(offset_dist, join_style=2)
                         oc = list(op.exterior.coords)
                         for i in range(len(oc)-1):
                             lines.append({"id":str(uuid.uuid4()),
@@ -904,7 +941,7 @@ async def nest(params: dict):
                     except: pass
             SESSION['interactive_lines'] = lines
 
-            panel_geo = create_rounded_panel(compw, comph, params.get('corner_r', 4.0))
+            panel_geo = create_rounded_panel(compw, comph, params_copy.get('corner_r', 4.0))
             fc = list(panel_geo.exterior.coords)
             for i in range(len(fc)-1):
                 lines.append({"id":str(uuid.uuid4()),
@@ -923,9 +960,16 @@ async def nest(params: dict):
                 })
 
             stats['elapsed'] = round(time.time()-t0, 3)
+            # ── FIX 1: report the actual panel dims used (may have been swapped)
+            stats['actual_panel_w'] = round(params_copy['panel_w'], 3)
+            stats['actual_panel_h'] = round(params_copy['panel_h'], 3)
+
             payload = {"ok":True, "stats":stats, "polys":polys_data,
                        "top3":top3_data, "lines":lines,
-                       "compressed_w":compw, "compressed_h":comph}
+                       "compressed_w":compw, "compressed_h":comph,
+                       # send back winning panel dims so frontend can update inputs
+                       "panel_w": params_copy['panel_w'],
+                       "panel_h": params_copy['panel_h']}
             progress_queue.put(("done", payload))
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -991,8 +1035,14 @@ async def reset_bridge():
     compw = SESSION.get('compressed_w', 0)
     comph = SESSION.get('compressed_h', 0)
     r_corner = SESSION.get('stats', {}).get('corner_r', 4.0)
+    # ── FIX 2: use saved spacing for offset on reset ───────────────────────────
+    last_params = SESSION.get('last_params', {})
+    offset_dist = float(last_params.get('spacing', 2.0))
+    if offset_dist <= 0:
+        offset_dist = 0.5
+
     if src_path and os.path.exists(src_path) and fps:
-        lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy)
+        lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy, offset_dist)
     else:
         lines = []
         for poly, ang, _, _ in fps:
@@ -1013,16 +1063,9 @@ async def reset_bridge():
     return {"ok":True, "lines":lines, "connectors":[]}
 
 
-# ── NEW: Propagate Bridge endpoint ────────────────────────────────────────────
+# ── Propagate Bridge endpoint ──────────────────────────────────────────────────
 @app.post("/propagate_bridge")
 async def propagate_bridge():
-    """
-    Propagate the current set of manually-placed bridges (manual_connectors)
-    to all copies in the panel:
-
-    - Nesting mode:  replicate per pair (A+B cell) → all grid cells
-    - Matrix/V-Cut:  replicate per single part → all parts
-    """
     connectors = SESSION.get('manual_connectors', [])
     fps        = SESSION.get('final_polys_with_info', [])
     mode       = SESSION.get('last_params', {}).get('mode', '')
@@ -1041,7 +1084,6 @@ async def propagate_bridge():
             copies = len(fps)
 
         SESSION['manual_connectors'] = all_connectors
-        # lines stay the same — only connectors are added
         serialized = [
             {"lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
              "r": c['r'], "ang": c['ang']}
@@ -1156,9 +1198,14 @@ async def adjust(data: dict):
         SESSION['manual_connectors']  = []
         SESSION['lines_history']      = []
 
+        # ── FIX 2: use spacing for offset on adjust ────────────────────────────
+        offset_dist = float(new_params.get('spacing', 2.0))
+        if offset_dist <= 0:
+            offset_dist = 0.5
+
         cx_cy = SESSION.get('_orig_cx_cy', (0.0, 0.0))
         if src_path and os.path.exists(src_path):
-            lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy)
+            lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy, offset_dist)
         else:
             lines = []
 
