@@ -1213,12 +1213,14 @@ async def propagate_bridge():
             gap_half = math.sqrt((src_c['rx']-src_c['lx'])**2 + (src_c['ry']-src_c['ly'])**2) / 2
             orig_l1 = src_c.get('orig_l1')
             orig_l2 = src_c.get('orig_l2')
-            # pt1 = the point on orig_l1 where the bridge was placed
-            # recover it from connector lx/ly (which is the gap_half offset from midpoint)
             smx = (src_c['lx'] + src_c['rx']) / 2
             smy = (src_c['ly'] + src_c['ry']) / 2
 
             for dx, dy in get_offsets(src_c):
+                # 跳過 source 自己（dx≈0, dy≈0），直接保留原 connector
+                if abs(dx) < 0.01 and abs(dy) < 0.01:
+                    all_connectors.append(src_c)
+                    continue
                 # Build expected coords for orig_l1 and orig_l2 at this copy
                 if orig_l1 and orig_l1.get('coords'):
                     expected_l1_coords = [
