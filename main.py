@@ -1,4 +1,4 @@
-import io, math, time, tempfile, os, uuid, json
+import io, math, time, tempfile, os, uuid, json, sys
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
@@ -17,15 +17,22 @@ try:
 except ImportError:
     JS_ROUND = 1
 
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+# ── Google Sheet 設定（可選） ──────────────────────────────────────────────────
+GOOGLE_ENABLED = False
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    GOOGLE_ENABLED = True
+except ImportError:
+    pass
 
-# ── Google Sheet 設定 ──────────────────────────────────────────────────────────
 SCOPES   = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_ID  = os.environ.get("GOOGLE_SHEET_ID", "")
 SHEET_TAB = "Input"
 
 def _get_service():
+    if not GOOGLE_ENABLED:
+        return None
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     if not sa_json:
         return None
@@ -38,11 +45,23 @@ def _get_service():
         print(f"[Sheet] Service Account error: {e}")
         return None
 
+# ── 靜態資源路徑（PyInstaller 相容） ──────────────────────────────────────────
+def get_static_dir():
+    if getattr(sys, 'frozen', False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "static")
+
 # ── FastAPI app ────────────────────────────────────────────────────────────────
-app = FastAPI()
+app = FastAPI(title="PCB Nesting Tool")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.on_event("startup")
+async def startup_event():
+    static_dir = get_static_dir()
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 @app.get("/auth/status")
 async def auth_status():
@@ -80,7 +99,6 @@ async def sheet_calculate(request: Request):
     if not svc:
         return JSONResponse({"error": "Service Account 未設定"}, status_code=401)
     body = await request.json()
-    print(f"[Sheet] body received: {body}")
     try:
         sheets = svc.spreadsheets()
         sheets.values().batchUpdate(
@@ -125,7 +143,6 @@ async def sheet_calculate(request: Request):
         return {"C27": c27, "C28": c28}
     except Exception as e:
         tb = traceback.format_exc()
-        print(f"[Sheet] ERROR:\n{tb}")
         return JSONResponse({"error": str(e), "detail": tb}, status_code=500)
 
 # ── In-memory session ──────────────────────────────────────────────────────────
@@ -145,30 +162,17 @@ def get_full_polygon_with_holes(file_path, target_doc=None):
     all_polys = []
     entities = msp.query('*[layer=="BOARD_OUTLINE_00"]')
     if not entities:
-        entities = msp.query('LWPOLYLINE POLYLINE CIRCLE ELLIPSE SPLINE ARC LINE')
+        entities = msp.query('LWPOLYLINE POLYLINE CIRCLE ELLIPSE SPLINE')
     for entity in entities:
         try:
             if entity.dxftype() == 'CIRCLE':
                 c = entity.dxf.center
                 poly = Point(c.x, c.y).buffer(entity.dxf.radius, quad_segs=32)
             else:
-                try:
-                    pts = list(make_path(entity).flattening(distance=0.005))
-                except Exception:
-                    pts = []
-
-                if len(pts) >= 3 and entity.dxftype() == 'SPLINE':
-                    p0, p1 = pts[0], pts[-1]
-                    if (p0.x - p1.x)**2 + (p0.y - p1.y)**2 > 0.001:
-                        pts = pts + [pts[0]]
-
+                pts = list(make_path(entity).flattening(distance=0.05))
                 if len(pts) < 3: continue
-
-                try:
-                    poly = Polygon([(p.x, p.y) for p in pts])
-                    if not poly.is_valid: poly = poly.buffer(0)
-                except Exception:
-                    continue
+                poly = Polygon([(p.x, p.y) for p in pts])
+                if not poly.is_valid: poly = poly.buffer(0)
             if poly.is_valid and not poly.is_empty and poly.area > 0.01:
                 all_polys.append(poly)
         except: continue
@@ -216,11 +220,8 @@ def refine_position(poly_a, poly_b, init_dx, init_dy, target_dist):
             no_improve_count = 0
     return best_dx, best_dy, best_b, best_area
 
+# ── FIX 1: 原本的排版邏輯抽出為 _run_nesting_single ──────────────────────────
 def _run_nesting_single(raw_poly, params, progress_cb=None):
-    """
-    Core nesting logic for a single panel orientation.
-    Returns (best_layout, bsw, bsh, bcc, bcr, candidates_top3).
-    """
     cw, ch = params["panel_w"], params["panel_h"]
     lb, rb, ub, db = params["left"], params["right"], params["top"], params["bottom"]
     spacing = params["spacing"]
@@ -346,24 +347,17 @@ def _run_nesting_single(raw_poly, params, progress_cb=None):
     return best_layout, bsw, bsh, bcc, bcr, candidates_top3
 
 
-# ── FIX 1: run_nesting tries both panel orientations and returns the best ──────
+# ── FIX 1: 新的 run_nesting 自動跑正反兩種方向取最佳 ─────────────────────────
 def run_nesting(raw_poly, params, progress_cb=None):
-    """
-    Try both panel orientations (W×H and H×W) and return the result
-    that fits the most parts.  If the dimensions are identical the
-    second run is skipped.
-    """
-    # --- orientation A: as given ---
+    # 方向 A：照使用者輸入
     def cb_a(pct):
-        if progress_cb: progress_cb(pct * 0.5)          # first half of progress
+        if progress_cb: progress_cb(pct * 0.5)
 
     result_a = _run_nesting_single(raw_poly, params, cb_a)
     count_a  = len(result_a[0])
 
-    # --- orientation B: swap W and H ---
-    swapped = (
-        abs(params["panel_w"] - params["panel_h"]) > 0.01   # only if not square
-    )
+    # 方向 B：交換 W/H（只有非正方形才跑）
+    swapped = abs(params["panel_w"] - params["panel_h"]) > 0.01
     result_b = None
     count_b  = -1
     if swapped:
@@ -372,27 +366,26 @@ def run_nesting(raw_poly, params, progress_cb=None):
         params_b["panel_h"] = params["panel_w"]
 
         def cb_b(pct):
-            if progress_cb: progress_cb(0.5 + pct * 0.5)  # second half
+            if progress_cb: progress_cb(0.5 + pct * 0.5)
 
         result_b = _run_nesting_single(raw_poly, params_b, cb_b)
         count_b  = len(result_b[0])
     else:
         if progress_cb: progress_cb(1.0)
 
-    # --- pick winner ---
+    # 取勝者
     if result_b is not None and count_b > count_a:
-        print(f"[Nesting] Swapped orientation wins: {count_b} > {count_a} pcs")
-        # patch params so downstream code sees the winning panel dimensions
+        print(f"[Nesting] 交換方向勝出: {count_b} > {count_a} pcs")
         params["panel_w"] = params_b["panel_w"]
         params["panel_h"] = params_b["panel_h"]
         return result_b
     else:
-        print(f"[Nesting] Original orientation wins: {count_a} pcs (swapped={count_b})")
+        print(f"[Nesting] 原始方向勝出: {count_a} pcs (swapped={count_b})")
         return result_a
 
 
+# ── FIX 2: offset_dist 改為參數，不再寫死 2mm ────────────────────────────────
 def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0):
-    # ── FIX 2: offset_dist is now passed in (defaults to 2.0 for safety) ──────
     import math as _math
 
     lines = []
@@ -481,7 +474,7 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0)
                                "coords":[[round(ec[i][0],4),round(ec[i][1],4)],
                                          [round(ec[i+1][0],4),round(ec[i+1][1],4)]]})
 
-        # ── FIX 2: use offset_dist instead of hardcoded 2 ─────────────────────
+        # FIX 2: 使用 offset_dist 取代寫死的 2
         try:
             op = poly.buffer(offset_dist, join_style=2)
             oc = list(op.exterior.coords)
@@ -650,8 +643,7 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
     return fps, stats, polys_data, compw, comph
 
 
-def calculate_bridge(data, lines, connectors):
-    gap_half = 1.75
+def calculate_bridge(data, lines, connectors, gap_half=1.75, r=1.0):
     l1 = lines[data['idx1']]
     l2 = lines[data['idx2']]
 
@@ -717,13 +709,11 @@ def calculate_bridge(data, lines, connectors):
         'type':'precise_sandglass_arc',
         'lx': mx-ux*gap_half, 'ly': my-uy*gap_half,
         'rx': mx+ux*gap_half, 'ry': my+uy*gap_half,
-        'r': 1.0, 'ang': ang
+        'r': r, 'ang': ang
     }
     new_connectors = list(connectors) + [connector]
     return new_lines, new_connectors
 
-
-# ── Propagate Bridge Logic ─────────────────────────────────────────────────────
 
 def _connector_midpoint(c):
     return (c['lx'] + c['rx']) / 2, (c['ly'] + c['ry']) / 2
@@ -760,13 +750,10 @@ def _find_owning_poly(connector, fp_list):
 def propagate_bridge_nesting(connectors, fps):
     if not connectors or not fps:
         return connectors
-
     fp_list = [p for p, a, f, c in fps]
     if len(fp_list) < 2:
         return connectors
-
     pair_count = len(fp_list) // 2
-
     pair_cx = []
     pair_cy = []
     for i in range(pair_count):
@@ -774,12 +761,10 @@ def propagate_bridge_nesting(connectors, fps):
         pb = fp_list[i * 2 + 1]
         pair_cx.append((pa.centroid.x + pb.centroid.x) / 2)
         pair_cy.append((pa.centroid.y + pb.centroid.y) / 2)
-
     all_connectors = []
     for c in connectors:
         src_pair = _find_owning_pair(c, fp_list)
         ref_cx, ref_cy = pair_cx[src_pair], pair_cy[src_pair]
-
         for i in range(pair_count):
             dx = pair_cx[i] - ref_cx
             dy = pair_cy[i] - ref_cy
@@ -789,24 +774,20 @@ def propagate_bridge_nesting(connectors, fps):
                 'rx': c['rx'] + dx, 'ry': c['ry'] + dy,
                 'r': c['r'], 'ang': c['ang']
             })
-
     return all_connectors
 
 
 def propagate_bridge_matrix_vcut(connectors, fps):
     if not connectors or not fps:
         return connectors
-
     fp_list = [p for p, a, f, c in fps]
     if len(fp_list) < 2:
         return connectors
-
     all_connectors = []
     for c in connectors:
         src_idx = _find_owning_poly(c, fp_list)
         ref_cx = fp_list[src_idx].centroid.x
         ref_cy = fp_list[src_idx].centroid.y
-
         for poly in fp_list:
             dx = poly.centroid.x - ref_cx
             dy = poly.centroid.y - ref_cy
@@ -816,14 +797,13 @@ def propagate_bridge_matrix_vcut(connectors, fps):
                 'rx': c['rx'] + dx, 'ry': c['ry'] + dy,
                 'r': c['r'], 'ang': c['ang']
             })
-
     return all_connectors
 
 
 # ── REST endpoints ─────────────────────────────────────────────────────────────
 @app.get("/")
 async def index():
-    return FileResponse("static/index.html")
+    return FileResponse(os.path.join(get_static_dir(), "index.html"))
 
 @app.post("/upload")
 async def upload_dxf(file: UploadFile = File(...)):
@@ -881,8 +861,7 @@ async def nest(params: dict):
             SESSION['doc_out'] = doc_out
             SESSION['geo_block_name'] = block_name
 
-            # ── FIX 1: run_nesting now tries both orientations internally ──────
-            # params dict may be mutated by run_nesting to reflect winning dims
+            # FIX 1: 用 copy 避免 run_nesting 修改到原始 params
             params_copy = dict(params)
             bl, bsw, bsh, bcc, bcr, top3 = run_nesting(raw, params_copy, progress_cb)
             if not bl:
@@ -906,9 +885,8 @@ async def nest(params: dict):
             SESSION['manual_connectors'] = []
             SESSION['lines_history'] = []
 
-            # ── FIX 2: pass spacing to build_interactive_lines_from_dxf ────────
+            # FIX 2: 讀 spacing 傳給 offset
             offset_dist = float(params_copy.get("spacing", 2.0))
-            # For V-Cut spacing is 0 — use a sensible minimum for the offset line
             if offset_dist <= 0:
                 offset_dist = 0.5
 
@@ -930,7 +908,6 @@ async def nest(params: dict):
                             lines.append({"id":str(uuid.uuid4()),
                                           "coords":[[hc[i][0],hc[i][1]],[hc[i+1][0],hc[i+1][1]]],
                                           "type":"hole","kind":"line"})
-                    # ── FIX 2: dynamic offset in fallback path ─────────────────
                     try:
                         op = poly.buffer(offset_dist, join_style=2)
                         oc = list(op.exterior.coords)
@@ -960,14 +937,10 @@ async def nest(params: dict):
                 })
 
             stats['elapsed'] = round(time.time()-t0, 3)
-            # ── FIX 1: report the actual panel dims used (may have been swapped)
-            stats['actual_panel_w'] = round(params_copy['panel_w'], 3)
-            stats['actual_panel_h'] = round(params_copy['panel_h'], 3)
-
             payload = {"ok":True, "stats":stats, "polys":polys_data,
                        "top3":top3_data, "lines":lines,
                        "compressed_w":compw, "compressed_h":comph,
-                       # send back winning panel dims so frontend can update inputs
+                       # FIX 1: 回傳實際使用的 panel 尺寸
                        "panel_w": params_copy['panel_w'],
                        "panel_h": params_copy['panel_h']}
             progress_queue.put(("done", payload))
@@ -1003,8 +976,14 @@ async def bridge(data: dict):
     lines = SESSION['interactive_lines']
     connectors = SESSION['manual_connectors']
     SESSION['lines_history'].append(json.loads(json.dumps(lines)))
+    # r = spacing / 2（offset 圓弧半徑）
+    spacing = float(SESSION.get('last_params', {}).get('spacing', 2.0))
+    r = max(spacing / 2, 0.1)
+    # gap_half = bridge_w / 2（使用者輸入）
+    bridge_w = float(data.get('bridge_w', 3.5))
+    gap_half = max(bridge_w / 2, 0.1)
     try:
-        new_lines, new_conn = calculate_bridge(data, lines, connectors)
+        new_lines, new_conn = calculate_bridge(data, lines, connectors, gap_half=gap_half, r=r)
         SESSION['interactive_lines'] = new_lines
         SESSION['manual_connectors'] = new_conn
         return {"ok":True, "lines":new_lines, "connectors":[
@@ -1035,12 +1014,11 @@ async def reset_bridge():
     compw = SESSION.get('compressed_w', 0)
     comph = SESSION.get('compressed_h', 0)
     r_corner = SESSION.get('stats', {}).get('corner_r', 4.0)
-    # ── FIX 2: use saved spacing for offset on reset ───────────────────────────
+    # FIX 2: reset 時也用 spacing
     last_params = SESSION.get('last_params', {})
     offset_dist = float(last_params.get('spacing', 2.0))
     if offset_dist <= 0:
         offset_dist = 0.5
-
     if src_path and os.path.exists(src_path) and fps:
         lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy, offset_dist)
     else:
@@ -1062,8 +1040,6 @@ async def reset_bridge():
     SESSION['interactive_lines'] = lines
     return {"ok":True, "lines":lines, "connectors":[]}
 
-
-# ── Propagate Bridge endpoint ──────────────────────────────────────────────────
 @app.post("/propagate_bridge")
 async def propagate_bridge():
     connectors = SESSION.get('manual_connectors', [])
@@ -1098,7 +1074,6 @@ async def propagate_bridge():
     except Exception as e:
         import traceback; traceback.print_exc()
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
 
 @app.post("/adjust")
 async def adjust(data: dict):
@@ -1198,7 +1173,7 @@ async def adjust(data: dict):
         SESSION['manual_connectors']  = []
         SESSION['lines_history']      = []
 
-        # ── FIX 2: use spacing for offset on adjust ────────────────────────────
+        # FIX 2: adjust 時也用 spacing
         offset_dist = float(new_params.get('spacing', 2.0))
         if offset_dist <= 0:
             offset_dist = 0.5
@@ -1301,7 +1276,26 @@ async def download_bridge_dxf():
     return StreamingResponse(io.BytesIO(data), media_type="application/dxf",
         headers={"Content-Disposition": "attachment; filename=production.dxf"})
 
+
 if __name__ == "__main__":
     import uvicorn
+    import webbrowser
+    import threading
+
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+    def open_browser():
+        import time
+        time.sleep(1.5)
+        webbrowser.open(f"http://localhost:{port}")
+
+    browser_thread = threading.Thread(target=open_browser, daemon=True)
+    browser_thread.start()
+
+    print(f"\n{'='*50}")
+    print(f"  PCB Nesting Tool")
+    print(f"  Running at: http://localhost:{port}")
+    print(f"  Press Ctrl+C to quit")
+    print(f"{'='*50}\n")
+
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
