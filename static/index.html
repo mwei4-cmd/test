@@ -284,6 +284,24 @@ input[type=range]{
   line-height:1.4;
 }
 
+/* ── Orient notice ── */
+#orient-notice{
+  display:none;
+  align-items:center;
+  gap:7px;
+  padding:7px 10px;
+  border-radius:4px;
+  background:color-mix(in srgb,var(--accent) 10%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
+  font-size:12px;
+  font-family:var(--mono);
+  color:var(--accent);
+  letter-spacing:.04em;
+  margin-bottom:8px;
+  line-height:1.4;
+}
+#orient-notice::before{content:'⇄';font-size:14px;flex-shrink:0;}
+
 /* ── Nest info bar ── */
 #nest-infobar{
   flex:1;
@@ -669,6 +687,11 @@ canvas{display:block;width:100%;height:100%}
     </div>
 
     <button class="btn btn-primary" id="run-btn" onclick="runNesting()" disabled>Run Layout</button>
+
+    <!-- ── FIX 1: orientation-swap notice ── -->
+    <div id="orient-notice">
+      Panel W↔H auto-swapped for better fit
+    </div>
   </div>
 
   <!-- Content -->
@@ -866,7 +889,6 @@ canvas{display:block;width:100%;height:100%}
         <!-- Propagate button -->
         <button id="propagate-btn" onclick="propagateBridge()" disabled title="Propagate bridges to all copies">
           <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-            <!-- grid-copy icon: 4 small squares with arrows -->
             <rect x="1" y="1" width="5" height="5" rx="1"/>
             <rect x="10" y="1" width="5" height="5" rx="1"/>
             <rect x="1" y="10" width="5" height="5" rx="1"/>
@@ -961,11 +983,14 @@ async function doUpload(file){
 // ── Run nesting ──
 async function runNesting(){
   showLoading('Initializing');
-  // reset propagate state when re-running layout
   resetPropagateState();
+  // ── FIX 1: capture original W/H so we can detect if backend swapped them ──
+  const origW = +document.getElementById('pw').value;
+  const origH = +document.getElementById('ph').value;
+
   const params={
-    panel_w:+document.getElementById('pw').value,
-    panel_h:+document.getElementById('ph').value,
+    panel_w: origW,
+    panel_h: origH,
     left:+document.getElementById('ml').value,
     right:+document.getElementById('mr').value,
     top:+document.getElementById('mt').value,
@@ -1000,9 +1025,10 @@ async function runNesting(){
         document.getElementById('prog-bar').style.width = pct+'%';
         document.getElementById('prog-pct').textContent = pct+'%';
         document.getElementById('prog-label').textContent =
-          pct < 30 ? 'Scanning directions' :
-          pct < 70 ? 'Computing nesting positions' :
-          pct < 95 ? 'Refining best candidate' : 'Post-processing';
+          pct < 25 ? 'Scanning directions (orientation A)' :
+          pct < 50 ? 'Refining orientation A' :
+          pct < 75 ? 'Scanning directions (orientation B)' :
+          pct < 95 ? 'Refining orientation B' : 'Post-processing';
       } else if(msg.type === 'done'){
         hideLoading();
         const d = msg.payload;
@@ -1020,6 +1046,23 @@ async function runNesting(){
         nestDrawAll();
         renderStatsTable(d.stats);
         sheetAutoFill();
+
+        // ── FIX 1: detect orientation swap and update inputs ────────────────
+        const notice = document.getElementById('orient-notice');
+        const returnedW = d.panel_w;
+        const returnedH = d.panel_h;
+        const wasSwapped = returnedW != null && returnedH != null &&
+                           Math.abs(returnedW - origW) > 0.05;
+        if(wasSwapped){
+          document.getElementById('pw').value = returnedW;
+          document.getElementById('ph').value = returnedH;
+          notice.style.display = 'flex';
+          notice.textContent = '⇄ Panel W↔H auto-swapped: ' +
+            origW + '×' + origH + ' → ' + returnedW + '×' + returnedH + ' mm';
+        } else {
+          notice.style.display = 'none';
+        }
+
       } else if(msg.type === 'error'){
         hideLoading();
         alert('Layout failed: '+msg.msg);
@@ -1235,7 +1278,6 @@ async function adjustLayout(dcol, drow){
   bridgeState.compW=d.compressed_w; bridgeState.compH=d.compressed_h;
   nestDrawAll(); renderStatsTable(d.stats);
   sheetAutoFill();
-  // reset propagate state when adjusting
   resetPropagateState();
 }
 
@@ -1392,7 +1434,6 @@ async function doBridge(idx1,pt1,idx2){
   const d=await r.json();
   if(!d.ok){setStatus('Error: '+d.error);return;}
   bridgeState.lines=d.lines; bridgeState.connectors=d.connectors;
-  // enable propagate button after at least one bridge is placed
   document.getElementById('propagate-btn').disabled = false;
   setStatus('Bridge added  —  total: '+d.connectors.length+' &nbsp;|&nbsp; Click ◈ Propagate All to copy to all copies');
   bridgeDrawAll();
@@ -1406,7 +1447,6 @@ async function undoBridge(){
     bridgeState.connectors=d.connectors;
     bridgeDrawAll();
     setStatus('Undone');
-    // disable propagate if no connectors left
     if(d.connectors.length===0){
       document.getElementById('propagate-btn').disabled=true;
       resetPropagateState();
@@ -1451,11 +1491,9 @@ async function propagateBridge(){
     bridgeState.connectors = d.connectors;
     bridgeDrawAll();
 
-    // show badge
     badge.textContent = '◈ ×' + d.connectors.length + ' bridges';
     badge.style.display = 'inline-flex';
 
-    // flash the canvas wrap
     const wrap = document.getElementById('bridge-canvas-wrap');
     wrap.classList.add('prop-flashing');
     setTimeout(()=>wrap.classList.remove('prop-flashing'), 600);
@@ -1504,8 +1542,6 @@ function sheetAutoFill() {
   const spacing = parseFloat(document.getElementById('spacing').value);
 
   if (mode.includes('Nesting')) {
-    // GapL = gap_x（bbox 間距，可能為負數，代表鑲嵌深度）
-    // GapW = 使用者填的 spacing
     set('sh-H11', s.gap_x);
     set('sh-I11', !isNaN(spacing) ? spacing : s.gap_y);
   } else {
