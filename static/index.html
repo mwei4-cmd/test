@@ -555,7 +555,10 @@ canvas{display:block;width:100%;height:100%}
 }
 .prop-flashing{animation:prop-flash .5s ease-out}
 
-#bridge-status{
+.bridge-btn.active-mode{
+  border-color:var(--accent) !important;
+  color:var(--accent) !important;
+}
   font-size:13px;
   color:var(--text3);
   font-family:var(--sans);
@@ -900,42 +903,47 @@ canvas{display:block;width:100%;height:100%}
         <!-- divider -->
         <div style="width:1px;height:22px;background:var(--border2);flex-shrink:0;margin:0 4px;"></div>
 
-        <!-- Eraser A: 單一刪除 -->
-        <button id="eraser-single-btn" class="bridge-btn" onclick="toggleEraser('single')" title="點 bridge 刪除單一">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" style="display:inline-block;vertical-align:middle;margin-right:5px">
-            <path d="M3 13h10M9.5 3.5l3 3-6.5 6.5-3-3 6.5-6.5z"/>
-            <path d="M6 11l3-3" stroke-width="1"/>
-          </svg>Single
+        <!-- 四個模式按鈕 -->
+        <!-- 橋接 -->
+        <button id="mode-bridge-btn" class="bridge-btn mode-btn active-mode" onclick="setMode('bridge')" title="點兩條線段建立橋接">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" style="display:inline-block;vertical-align:middle;margin-right:4px">
+            <path d="M2 8 Q5 3 8 8 Q11 13 14 8"/>
+          </svg>Bridge
         </button>
 
-        <!-- Eraser B: 陣列刪除 -->
-        <button id="eraser-array-btn" class="bridge-btn" onclick="toggleEraser('array')" title="點 bridge 刪除全部同位置">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" style="display:inline-block;vertical-align:middle;margin-right:5px">
-            <path d="M3 13h10M9.5 3.5l3 3-6.5 6.5-3-3 6.5-6.5z"/>
-            <path d="M6 11l3-3" stroke-width="1"/>
-            <circle cx="13" cy="3" r="2" fill="currentColor" stroke="none"/>
-          </svg>Array
+        <!-- 橋接陣列 -->
+        <button id="mode-bridge-array-btn" class="bridge-btn mode-btn" onclick="setMode('bridge-array')" title="建立橋接並套用到所有副本">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" style="display:inline-block;vertical-align:middle;margin-right:4px">
+            <path d="M2 8 Q5 3 8 8 Q11 13 14 8"/>
+            <circle cx="13" cy="3" r="2.2" fill="currentColor" stroke="none"/>
+          </svg>Bridge ×All
         </button>
 
         <!-- divider -->
         <div style="width:1px;height:22px;background:var(--border2);flex-shrink:0;margin:0 4px;"></div>
 
-        <!-- Propagate button -->
-        <button id="propagate-btn" onclick="propagateBridge()" disabled title="Propagate bridges to all copies">
-          <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-            <rect x="1" y="1" width="5" height="5" rx="1"/>
-            <rect x="10" y="1" width="5" height="5" rx="1"/>
-            <rect x="1" y="10" width="5" height="5" rx="1"/>
-            <rect x="10" y="10" width="5" height="5" rx="1"/>
-            <path d="M6.5 3.5h3M3.5 6.5v3M12.5 6.5v3M6.5 12.5h3" stroke-linecap="round"/>
-          </svg>
-          <span id="propagate-label">Propagate All</span>
+        <!-- 橡皮擦單一 -->
+        <button id="mode-erase-btn" class="bridge-btn mode-btn" onclick="setMode('erase')" title="點橋接刪除單一">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" style="display:inline-block;vertical-align:middle;margin-right:4px">
+            <path d="M3 13h10M9.5 3.5l3 3-6 6-3-3 6-6z"/>
+          </svg>Erase
         </button>
+
+        <!-- 橡皮擦陣列 -->
+        <button id="mode-erase-array-btn" class="bridge-btn mode-btn" onclick="setMode('erase-array')" title="點橋接刪除所有同位置副本">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" style="display:inline-block;vertical-align:middle;margin-right:4px">
+            <path d="M3 13h10M9.5 3.5l3 3-6 6-3-3 6-6z"/>
+            <circle cx="13" cy="3" r="2.2" fill="currentColor" stroke="none"/>
+          </svg>Erase ×All
+        </button>
+
+        <!-- divider -->
+        <div style="width:1px;height:22px;background:var(--border2);flex-shrink:0;margin:0 4px;"></div>
 
         <!-- badge: shows after propagation -->
         <span id="prop-badge"></span>
 
-        <span id="bridge-status">Click two line segments to create a bridge &nbsp;|&nbsp; Scroll to zoom &nbsp;|&nbsp; Middle-drag to pan</span>
+        <span id="bridge-status">Select mode → click segments to bridge &nbsp;|&nbsp; Scroll to zoom &nbsp;|&nbsp; Middle-drag to pan</span>
       </div>
       <div id="bridge-canvas-wrap"><canvas id="bridge-canvas"></canvas></div>
     </div>
@@ -1343,7 +1351,7 @@ const bridgeState={
   lines:[], connectors:[], compW:0, compH:0,
   scale:1, ox:0, oy:0, drag:false, lx:0, ly:0,
   hover:-1, hoverConnector:-1, selected:[], firstPt:null,
-  eraserMode: null   // null | 'single' | 'array'
+  currentMode: 'bridge'   // 'bridge' | 'bridge-array' | 'erase' | 'erase-array'
 };
 const TYPE_COLOR={
   body:{n:'#e8e8e8',g:'#ffffff'}, hole:{n:'#e8e8e8',g:'#ffffff'},
@@ -1423,22 +1431,27 @@ bc.onwheel=e=>{
 bc.onmousedown=e=>{
   if(e.button===1){bridgeState.drag=true;bridgeState.lx=e.clientX;bridgeState.ly=e.clientY;e.preventDefault();}
   else if(e.button===0){
+    const mode=bridgeState.currentMode;
     // 橡皮擦模式：點 connector 刪除
-    if(bridgeState.eraserMode && bridgeState.hoverConnector!==-1){
+    if((mode==='erase'||mode==='erase-array') && bridgeState.hoverConnector!==-1){
       const c=bridgeState.connectors[bridgeState.hoverConnector];
-      if(bridgeState.eraserMode==='single') doDeleteBridge(c.id);
+      if(mode==='erase') doDeleteBridge(c.id);
       else doDeleteBridgeArray(c.id);
       return;
     }
-    // 一般模式：點線段建立 bridge
-    if(bridgeState.hover!==-1){
+    // 橋接模式：點線段
+    if((mode==='bridge'||mode==='bridge-array') && bridgeState.hover!==-1){
       const rx=fromBX(e.clientX), ry=fromBY(e.clientY);
       if(bridgeState.selected.length===0){
         bridgeState.selected=[bridgeState.hover]; bridgeState.firstPt={x:rx,y:ry};
-        setStatus('Selected first segment ('+bridgeState.lines[bridgeState.hover].type+') — select second');
+        setStatus('Selected first segment — select second');
       } else {
-        if(bridgeState.hover===bridgeState.selected[0]){ bridgeState.selected=[];bridgeState.firstPt=null;setStatus('Selection cleared'); }
-        else { doBridge(bridgeState.selected[0],bridgeState.firstPt,bridgeState.hover); bridgeState.selected=[];bridgeState.firstPt=null; }
+        if(bridgeState.hover===bridgeState.selected[0]){
+          bridgeState.selected=[];bridgeState.firstPt=null;setStatus('Selection cleared');
+        } else {
+          doBridge(bridgeState.selected[0],bridgeState.firstPt,bridgeState.hover);
+          bridgeState.selected=[];bridgeState.firstPt=null;
+        }
       }
       bridgeDrawAll();
     }
@@ -1453,7 +1466,8 @@ bc.onmousemove=e=>{
   // hover connector（橡皮擦模式）
   const prevHC = bridgeState.hoverConnector;
   bridgeState.hoverConnector = -1;
-  if(bridgeState.eraserMode){
+  const isEraseMode = bridgeState.currentMode==='erase'||bridgeState.currentMode==='erase-array';
+  if(isEraseMode){
     const thresh = 8/bridgeState.scale;
     bridgeState.connectors.forEach((c,i)=>{
       const cmx=(c.lx+c.rx)/2, cmy=(c.ly+c.ry)/2;
@@ -1490,28 +1504,22 @@ bc.onmousemove=e=>{
   if(lh!==bridgeState.hover)bridgeDrawAll();
 };
 
-function toggleEraser(mode){
-  if(bridgeState.eraserMode===mode){
-    bridgeState.eraserMode=null;
-  } else {
-    bridgeState.eraserMode=mode;
-    bridgeState.selected=[];
-    bridgeState.firstPt=null;
-  }
-  const sa=document.getElementById('eraser-single-btn');
-  const sb=document.getElementById('eraser-array-btn');
-  const onA=bridgeState.eraserMode==='single';
-  const onB=bridgeState.eraserMode==='array';
-  sa.style.borderColor=onA?'var(--accent)':'';
-  sa.style.color=onA?'var(--accent)':'';
-  sb.style.borderColor=onB?'var(--accent)':'';
-  sb.style.color=onB?'var(--accent)':'';
-  bc.style.cursor=bridgeState.eraserMode?'cell':'';
-  setStatus(bridgeState.eraserMode
-    ? (bridgeState.eraserMode==='single'
-        ? 'Eraser: click a bridge to delete it'
-        : 'Eraser Array: click a bridge to delete all copies')
-    : 'Click two line segments to create a bridge \u00a0|\u00a0 Scroll to zoom \u00a0|\u00a0 Middle-drag to pan');
+function setMode(mode){
+  bridgeState.currentMode = mode;
+  bridgeState.selected = [];
+  bridgeState.firstPt = null;
+  bridgeState.hoverConnector = -1;
+  const isErase = mode==='erase'||mode==='erase-array';
+  bc.style.cursor = isErase ? 'cell' : '';
+  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.remove('active-mode'));
+  document.getElementById('mode-'+mode+'-btn').classList.add('active-mode');
+  const statusMap = {
+    'bridge':       'Bridge: click two offset lines to create a bridge',
+    'bridge-array': 'Bridge ×All: create bridge then propagate to all copies automatically',
+    'erase':        'Erase: click a bridge to delete it',
+    'erase-array':  'Erase ×All: click a bridge to delete all copies',
+  };
+  setStatus(statusMap[mode]);
   bridgeDrawAll();
 }
 
@@ -1522,7 +1530,6 @@ async function doDeleteBridge(connector_id){
   bridgeState.lines=d.lines; bridgeState.connectors=d.connectors;
   bridgeState.hoverConnector=-1;
   setStatus('Bridge deleted — '+d.connectors.length+' remaining');
-  if(d.connectors.length===0){ document.getElementById('propagate-btn').disabled=true; resetPropagateState(); }
   bridgeDrawAll();
 }
 
@@ -1533,7 +1540,6 @@ async function doDeleteBridgeArray(connector_id){
   bridgeState.lines=d.lines; bridgeState.connectors=d.connectors;
   bridgeState.hoverConnector=-1;
   setStatus('Deleted '+d.deleted+' bridges — '+d.connectors.length+' remaining');
-  if(d.connectors.length===0){ document.getElementById('propagate-btn').disabled=true; resetPropagateState(); }
   bridgeDrawAll();
 }
 
@@ -1546,9 +1552,14 @@ async function doBridge(idx1,pt1,idx2){
   const d=await r.json();
   if(!d.ok){setStatus('Error: '+d.error);return;}
   bridgeState.lines=d.lines; bridgeState.connectors=d.connectors;
-  document.getElementById('propagate-btn').disabled = false;
-  setStatus('Bridge added  —  total: '+d.connectors.length+' &nbsp;|&nbsp; Click ◈ Propagate All to copy to all copies');
   bridgeDrawAll();
+  // bridge-array 模式：自動 propagate
+  if(bridgeState.currentMode==='bridge-array'){
+    setStatus('Bridge placed — propagating to all copies…');
+    await propagateBridge();
+  } else {
+    setStatus('Bridge added — total: '+d.connectors.length);
+  }
 }
 
 async function undoBridge(){
@@ -1559,10 +1570,7 @@ async function undoBridge(){
     bridgeState.connectors=d.connectors;
     bridgeDrawAll();
     setStatus('Undone');
-    if(d.connectors.length===0){
-      document.getElementById('propagate-btn').disabled=true;
-      resetPropagateState();
-    }
+    if(d.connectors.length===0) resetPropagateState();
   }
 }
 
@@ -1574,7 +1582,6 @@ async function resetBridge(){
     bridgeState.connectors=[];
     bridgeDrawAll();
     setStatus('Reset complete');
-    document.getElementById('propagate-btn').disabled=true;
     resetPropagateState();
   }
 }
@@ -1582,41 +1589,29 @@ async function resetBridge(){
 // ── Propagate Bridge ──────────────────────────────────────────────────────────
 function resetPropagateState(){
   const badge = document.getElementById('prop-badge');
-  badge.style.display = 'none';
-  badge.textContent = '';
-  document.getElementById('propagate-btn').disabled = true;
-  document.getElementById('propagate-label').textContent = 'Propagate All';
+  if(badge){ badge.style.display='none'; badge.textContent=''; }
 }
 
 async function propagateBridge(){
-  const btn = document.getElementById('propagate-btn');
   const badge = document.getElementById('prop-badge');
-  btn.disabled = true;
   setStatus('Propagating bridges to all copies…');
-
   try {
     const r = await fetch('/propagate_bridge', {method:'POST'});
     const d = await r.json();
-    if(!d.ok){ setStatus('Propagate failed: '+(d.error||'unknown error')); btn.disabled=false; return; }
-
+    if(!d.ok){ setStatus('Propagate failed: '+(d.error||'unknown error')); return; }
     bridgeState.lines = d.lines;
     bridgeState.connectors = d.connectors;
     bridgeDrawAll();
-
-    badge.textContent = '◈ ×' + d.connectors.length + ' bridges';
-    badge.style.display = 'inline-flex';
-
+    if(badge){
+      badge.textContent = '◈ ×' + d.connectors.length + ' bridges';
+      badge.style.display = 'inline-flex';
+    }
     const wrap = document.getElementById('bridge-canvas-wrap');
     wrap.classList.add('prop-flashing');
     setTimeout(()=>wrap.classList.remove('prop-flashing'), 600);
-
-    setStatus('Propagated — ' + d.connectors.length + ' bridges total across ' + d.copies + ' copies');
-    document.getElementById('propagate-label').textContent = 'Re-propagate';
-    btn.disabled = false;
-
+    setStatus('Propagated — ' + d.connectors.length + ' bridges across ' + d.copies + ' copies');
   } catch(e){
     setStatus('Propagate error: '+e.message);
-    btn.disabled = false;
   }
 }
 
