@@ -900,6 +900,26 @@ canvas{display:block;width:100%;height:100%}
         <!-- divider -->
         <div style="width:1px;height:22px;background:var(--border2);flex-shrink:0;margin:0 4px;"></div>
 
+        <!-- Eraser A: 單一刪除 -->
+        <button id="eraser-single-btn" class="bridge-btn" onclick="toggleEraser('single')" title="點 bridge 刪除單一">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" style="display:inline-block;vertical-align:middle;margin-right:5px">
+            <path d="M3 13h10M9.5 3.5l3 3-6.5 6.5-3-3 6.5-6.5z"/>
+            <path d="M6 11l3-3" stroke-width="1"/>
+          </svg>Single
+        </button>
+
+        <!-- Eraser B: 陣列刪除 -->
+        <button id="eraser-array-btn" class="bridge-btn" onclick="toggleEraser('array')" title="點 bridge 刪除全部同位置">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" style="display:inline-block;vertical-align:middle;margin-right:5px">
+            <path d="M3 13h10M9.5 3.5l3 3-6.5 6.5-3-3 6.5-6.5z"/>
+            <path d="M6 11l3-3" stroke-width="1"/>
+            <circle cx="13" cy="3" r="2" fill="currentColor" stroke="none"/>
+          </svg>Array
+        </button>
+
+        <!-- divider -->
+        <div style="width:1px;height:22px;background:var(--border2);flex-shrink:0;margin:0 4px;"></div>
+
         <!-- Propagate button -->
         <button id="propagate-btn" onclick="propagateBridge()" disabled title="Propagate bridges to all copies">
           <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
@@ -1322,7 +1342,8 @@ function renderStatsTable(s){
 const bridgeState={
   lines:[], connectors:[], compW:0, compH:0,
   scale:1, ox:0, oy:0, drag:false, lx:0, ly:0,
-  hover:-1, selected:[], firstPt:null
+  hover:-1, hoverConnector:-1, selected:[], firstPt:null,
+  eraserMode: null   // null | 'single' | 'array'
 };
 const TYPE_COLOR={
   body:{n:'#e8e8e8',g:'#ffffff'}, hole:{n:'#e8e8e8',g:'#ffffff'},
@@ -1374,11 +1395,15 @@ function bridgeDrawAll(){
     else { ctx.strokeStyle=st.n;ctx.lineWidth=dw;ctx.shadowBlur=0; }
     ctx.stroke();ctx.shadowBlur=0;
   });
-  connectors.forEach(b=>{
-    ctx.strokeStyle='#e0e0e0';ctx.lineWidth=dw*1.5;
+  connectors.forEach((b,i)=>{
+    const isHov = (i===bridgeState.hoverConnector && bridgeState.eraserMode);
+    ctx.strokeStyle = isHov ? '#ff6060' : '#e0e0e0';
+    ctx.lineWidth = dw * (isHov ? 2.5 : 1.5);
+    if(isHov){ ctx.shadowBlur=8; ctx.shadowColor='#ff6060'; }
     const rad=b.r*s, ar=b.ang*Math.PI/180;
     ctx.beginPath();ctx.arc(tx(b.lx),ty(b.ly),rad,-ar-Math.PI/2,-ar+Math.PI/2);ctx.stroke();
     ctx.beginPath();ctx.arc(tx(b.rx),ty(b.ry),rad,-ar+Math.PI/2,-ar+1.5*Math.PI);ctx.stroke();
+    ctx.shadowBlur=0;
   });
   if(firstPt){ ctx.fillStyle='#ffffff';ctx.beginPath();ctx.arc(tx(firstPt.x),ty(firstPt.y),3,0,Math.PI*2);ctx.fill(); }
 }
@@ -1397,16 +1422,26 @@ bc.onwheel=e=>{
 };
 bc.onmousedown=e=>{
   if(e.button===1){bridgeState.drag=true;bridgeState.lx=e.clientX;bridgeState.ly=e.clientY;e.preventDefault();}
-  else if(e.button===0&&bridgeState.hover!==-1){
-    const rx=fromBX(e.clientX), ry=fromBY(e.clientY);
-    if(bridgeState.selected.length===0){
-      bridgeState.selected=[bridgeState.hover]; bridgeState.firstPt={x:rx,y:ry};
-      setStatus('Selected first segment ('+bridgeState.lines[bridgeState.hover].type+') — select second');
-    } else {
-      if(bridgeState.hover===bridgeState.selected[0]){ bridgeState.selected=[];bridgeState.firstPt=null;setStatus('Selection cleared'); }
-      else { doBridge(bridgeState.selected[0],bridgeState.firstPt,bridgeState.hover); bridgeState.selected=[];bridgeState.firstPt=null; }
+  else if(e.button===0){
+    // 橡皮擦模式：點 connector 刪除
+    if(bridgeState.eraserMode && bridgeState.hoverConnector!==-1){
+      const c=bridgeState.connectors[bridgeState.hoverConnector];
+      if(bridgeState.eraserMode==='single') doDeleteBridge(c.id);
+      else doDeleteBridgeArray(c.id);
+      return;
     }
-    bridgeDrawAll();
+    // 一般模式：點線段建立 bridge
+    if(bridgeState.hover!==-1){
+      const rx=fromBX(e.clientX), ry=fromBY(e.clientY);
+      if(bridgeState.selected.length===0){
+        bridgeState.selected=[bridgeState.hover]; bridgeState.firstPt={x:rx,y:ry};
+        setStatus('Selected first segment ('+bridgeState.lines[bridgeState.hover].type+') — select second');
+      } else {
+        if(bridgeState.hover===bridgeState.selected[0]){ bridgeState.selected=[];bridgeState.firstPt=null;setStatus('Selection cleared'); }
+        else { doBridge(bridgeState.selected[0],bridgeState.firstPt,bridgeState.hover); bridgeState.selected=[];bridgeState.firstPt=null; }
+      }
+      bridgeDrawAll();
+    }
   }
 };
 bc.onmousemove=e=>{
@@ -1415,6 +1450,21 @@ bc.onmousemove=e=>{
     bridgeState.ox+=e.clientX-bridgeState.lx;bridgeState.oy+=e.clientY-bridgeState.ly;
     bridgeState.lx=e.clientX;bridgeState.ly=e.clientY;bridgeDrawAll();return;
   }
+  // hover connector（橡皮擦模式）
+  const prevHC = bridgeState.hoverConnector;
+  bridgeState.hoverConnector = -1;
+  if(bridgeState.eraserMode){
+    const thresh = 8/bridgeState.scale;
+    bridgeState.connectors.forEach((c,i)=>{
+      const cmx=(c.lx+c.rx)/2, cmy=(c.ly+c.ry)/2;
+      if(Math.sqrt((rx-cmx)**2+(ry-cmy)**2) < thresh) bridgeState.hoverConnector=i;
+    });
+    bc.style.cursor = bridgeState.hoverConnector!==-1 ? 'crosshair' : 'cell';
+    if(prevHC!==bridgeState.hoverConnector) bridgeDrawAll();
+    return;
+  }
+  bc.style.cursor='';
+  // hover line
   let lh=bridgeState.hover; bridgeState.hover=-1;
   let md=16/bridgeState.scale;
   bridgeState.lines.forEach((l,i)=>{
@@ -1439,6 +1489,53 @@ bc.onmousemove=e=>{
   });
   if(lh!==bridgeState.hover)bridgeDrawAll();
 };
+
+function toggleEraser(mode){
+  if(bridgeState.eraserMode===mode){
+    bridgeState.eraserMode=null;
+  } else {
+    bridgeState.eraserMode=mode;
+    bridgeState.selected=[];
+    bridgeState.firstPt=null;
+  }
+  const sa=document.getElementById('eraser-single-btn');
+  const sb=document.getElementById('eraser-array-btn');
+  const onA=bridgeState.eraserMode==='single';
+  const onB=bridgeState.eraserMode==='array';
+  sa.style.borderColor=onA?'var(--accent)':'';
+  sa.style.color=onA?'var(--accent)':'';
+  sb.style.borderColor=onB?'var(--accent)':'';
+  sb.style.color=onB?'var(--accent)':'';
+  bc.style.cursor=bridgeState.eraserMode?'cell':'';
+  setStatus(bridgeState.eraserMode
+    ? (bridgeState.eraserMode==='single'
+        ? 'Eraser: click a bridge to delete it'
+        : 'Eraser Array: click a bridge to delete all copies')
+    : 'Click two line segments to create a bridge \u00a0|\u00a0 Scroll to zoom \u00a0|\u00a0 Middle-drag to pan');
+  bridgeDrawAll();
+}
+
+async function doDeleteBridge(connector_id){
+  const r=await fetch('/delete_bridge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({connector_id})});
+  const d=await r.json();
+  if(!d.ok){setStatus('Error: '+d.error);return;}
+  bridgeState.lines=d.lines; bridgeState.connectors=d.connectors;
+  bridgeState.hoverConnector=-1;
+  setStatus('Bridge deleted — '+d.connectors.length+' remaining');
+  if(d.connectors.length===0){ document.getElementById('propagate-btn').disabled=true; resetPropagateState(); }
+  bridgeDrawAll();
+}
+
+async function doDeleteBridgeArray(connector_id){
+  const r=await fetch('/delete_bridge_array',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({connector_id})});
+  const d=await r.json();
+  if(!d.ok){setStatus('Error: '+d.error);return;}
+  bridgeState.lines=d.lines; bridgeState.connectors=d.connectors;
+  bridgeState.hoverConnector=-1;
+  setStatus('Deleted '+d.deleted+' bridges — '+d.connectors.length+' remaining');
+  if(d.connectors.length===0){ document.getElementById('propagate-btn').disabled=true; resetPropagateState(); }
+  bridgeDrawAll();
+}
 
 function setStatus(msg){document.getElementById('bridge-status').textContent=msg;}
 
