@@ -702,16 +702,43 @@ def calculate_bridge(data, lines, connectors, gap_half=1.75, r=1.0):
 
     ids_remove = {l1['id'], l2['id']}
     new_lines = [l for l in lines if l['id'] not in ids_remove]
-    new_lines += split(line1, l1, p1, l1['type'])
-    new_lines += split(line2, l2, p2, l2['type'])
+    cut_segs_1 = split(line1, l1, p1, l1['type'])
+    cut_segs_2 = split(line2, l2, p2, l2['type'])
+    new_lines += cut_segs_1
+    new_lines += cut_segs_2
+
+    # 記錄原始線段與切割產生的 id，供刪除時補回
+    cut_ids = [s['id'] for s in cut_segs_1 + cut_segs_2]
+    orig_l1 = dict(l1, id=str(uuid.uuid4()))
+    orig_l2 = dict(l2, id=str(uuid.uuid4()))
 
     connector = {
-        'type':'precise_sandglass_arc',
+        'type': 'precise_sandglass_arc',
         'lx': mx-ux*gap_half, 'ly': my-uy*gap_half,
         'rx': mx+ux*gap_half, 'ry': my+uy*gap_half,
-        'r': r, 'ang': ang
+        'r': r, 'ang': ang,
+        'id': str(uuid.uuid4()),
+        'cut_ids': cut_ids,
+        'orig_l1': orig_l1,
+        'orig_l2': orig_l2,
     }
     new_connectors = list(connectors) + [connector]
+    return new_lines, new_connectors
+
+
+def delete_bridge(connector_id, lines, connectors):
+    """刪除單一 bridge，補回被切斷的原始線段。"""
+    target = next((c for c in connectors if c.get('id') == connector_id), None)
+    if target is None:
+        raise ValueError(f"connector {connector_id} not found")
+    cut_ids = set(target.get('cut_ids', []))
+    new_lines = [l for l in lines if l['id'] not in cut_ids]
+    # 補回原始線段
+    if target.get('orig_l1'):
+        new_lines.append(target['orig_l1'])
+    if target.get('orig_l2'):
+        new_lines.append(target['orig_l2'])
+    new_connectors = [c for c in connectors if c.get('id') != connector_id]
     return new_lines, new_connectors
 
 
@@ -987,10 +1014,98 @@ async def bridge(data: dict):
         SESSION['interactive_lines'] = new_lines
         SESSION['manual_connectors'] = new_conn
         return {"ok":True, "lines":new_lines, "connectors":[
-            {"lx":c['lx'],"ly":c['ly'],"rx":c['rx'],"ry":c['ry'],
+            {"id":c['id'],"lx":c['lx'],"ly":c['ly'],"rx":c['rx'],"ry":c['ry'],
              "r":c['r'],"ang":c['ang']} for c in new_conn]}
     except Exception as e:
         return JSONResponse({"ok":False,"error":str(e)}, status_code=400)
+
+@app.post("/delete_bridge")
+async def delete_bridge_single(data: dict):
+    """刪除單一 bridge，補回被切斷的原始線段。"""
+    connector_id = data.get('connector_id')
+    if not connector_id:
+        return JSONResponse({"ok": False, "error": "Missing connector_id"}, status_code=400)
+    lines = SESSION['interactive_lines']
+    connectors = SESSION['manual_connectors']
+    SESSION['lines_history'].append(json.loads(json.dumps(lines)))
+    try:
+        new_lines, new_conn = delete_bridge(connector_id, lines, connectors)
+        SESSION['interactive_lines'] = new_lines
+        SESSION['manual_connectors'] = new_conn
+        return {"ok": True, "lines": new_lines, "connectors": [
+            {"id": c.get('id',''), "lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
+             "r": c['r'], "ang": c['ang']} for c in new_conn]}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+@app.post("/delete_bridge_array")
+async def delete_bridge_array_endpoint(data: dict):
+    """刪除某個 bridge 所有陣列 copies。"""
+    connector_id = data.get('connector_id')
+    if not connector_id:
+        return JSONResponse({"ok": False, "error": "Missing connector_id"}, status_code=400)
+    lines = SESSION['interactive_lines']
+    connectors = SESSION['manual_connectors']
+    fps = SESSION.get('final_polys_with_info', [])
+    mode = SESSION.get('last_params', {}).get('mode', '')
+
+    target = next((c for c in connectors if c.get('id') == connector_id), None)
+    if target is None:
+        return JSONResponse({"ok": False, "error": "Connector not found"}, status_code=400)
+
+    SESSION['lines_history'].append(json.loads(json.dumps(lines)))
+
+    fp_list = [p for p, a, f, c in fps]
+    tmx, tmy = _connector_midpoint(target)
+
+    if "Nesting" in mode:
+        pair_count = len(fp_list) // 2
+        src_pair = _find_owning_pair(target, fp_list)
+        ref_cx = (fp_list[src_pair*2].centroid.x + fp_list[src_pair*2+1].centroid.x) / 2
+        ref_cy = (fp_list[src_pair*2].centroid.y + fp_list[src_pair*2+1].centroid.y) / 2
+        local_x = tmx - ref_cx
+        local_y = tmy - ref_cy
+        ids_to_delete = set()
+        for i in range(pair_count):
+            pcx = (fp_list[i*2].centroid.x + fp_list[i*2+1].centroid.x) / 2
+            pcy = (fp_list[i*2].centroid.y + fp_list[i*2+1].centroid.y) / 2
+            expected_x = pcx + local_x
+            expected_y = pcy + local_y
+            for c in connectors:
+                cmx, cmy = _connector_midpoint(c)
+                if abs(cmx - expected_x) < 0.5 and abs(cmy - expected_y) < 0.5:
+                    ids_to_delete.add(c.get('id'))
+    else:
+        src_idx = _find_owning_poly(target, fp_list)
+        ref_cx = fp_list[src_idx].centroid.x
+        ref_cy = fp_list[src_idx].centroid.y
+        local_x = tmx - ref_cx
+        local_y = tmy - ref_cy
+        ids_to_delete = set()
+        for poly in fp_list:
+            expected_x = poly.centroid.x + local_x
+            expected_y = poly.centroid.y + local_y
+            for c in connectors:
+                cmx, cmy = _connector_midpoint(c)
+                if abs(cmx - expected_x) < 0.5 and abs(cmy - expected_y) < 0.5:
+                    ids_to_delete.add(c.get('id'))
+
+    try:
+        cur_lines = lines
+        cur_conns = connectors
+        for cid in ids_to_delete:
+            cur_lines, cur_conns = delete_bridge(cid, cur_lines, cur_conns)
+        SESSION['interactive_lines'] = cur_lines
+        SESSION['manual_connectors'] = cur_conns
+        return {"ok": True, "lines": cur_lines, "connectors": [
+            {"id": c.get('id',''), "lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
+             "r": c['r'], "ang": c['ang']} for c in cur_conns],
+            "deleted": len(ids_to_delete)}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
 
 @app.post("/undo")
 async def undo():
@@ -999,7 +1114,7 @@ async def undo():
     if SESSION['manual_connectors']:
         SESSION['manual_connectors'].pop()
     return {"ok":True, "lines":SESSION['interactive_lines'],
-            "connectors":[{"lx":c['lx'],"ly":c['ly'],"rx":c['rx'],"ry":c['ry'],
+            "connectors":[{"id":c.get('id',''),"lx":c['lx'],"ly":c['ly'],"rx":c['rx'],"ry":c['ry'],
                             "r":c['r'],"ang":c['ang']}
                            for c in SESSION['manual_connectors']]}
 
@@ -1061,7 +1176,7 @@ async def propagate_bridge():
 
         SESSION['manual_connectors'] = all_connectors
         serialized = [
-            {"lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
+            {"id": c.get('id',''), "lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
              "r": c['r'], "ang": c['ang']}
             for c in all_connectors
         ]
