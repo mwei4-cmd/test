@@ -1235,7 +1235,7 @@ async def propagate_bridge():
                 cands_r = sorted(
                     [(i,l) for i,l in enumerate(cur_lines)
                      if l.get('type')=='offset' and dist_to_line(l,nrx,nry)<thresh
-                     and (not cands_l or x[0]!=cands_l[0][0])],
+                     and (not cands_l or i!=cands_l[0][0])],
                     key=lambda x: dist_to_line(x[1],nrx,nry))
 
                 if cands_l and cands_r and cands_l[0][0] != cands_r[0][0]:
