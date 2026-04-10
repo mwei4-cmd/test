@@ -164,18 +164,45 @@ def get_full_polygon_with_holes(file_path, target_doc=None):
     if not entities:
         entities = msp.query('LWPOLYLINE POLYLINE CIRCLE ELLIPSE SPLINE')
     for entity in entities:
-        try:
-            if entity.dxftype() == 'CIRCLE':
-                c = entity.dxf.center
-                poly = Point(c.x, c.y).buffer(entity.dxf.radius, quad_segs=32)
+    try:
+        if entity.dxftype() == 'CIRCLE':
+            c = entity.dxf.center
+            poly = Point(c.x, c.y).buffer(entity.dxf.radius, quad_segs=32)
+        elif entity.dxftype() == 'SPLINE':
+            spline_flags = entity.dxf.flags if entity.dxf.hasattr('flags') else 0
+            is_closed   = bool(spline_flags & 1)
+            is_rational = bool(spline_flags & 4)
+            has_ctrl    = len(list(entity.control_points)) > 0
+            if is_rational and is_closed and has_ctrl:
+                from ezdxf.math import BSpline
+                import numpy as np
+                ctrl    = [(float(p[0]), float(p[1])) for p in entity.control_points]
+                knots   = list(entity.knots)
+                weights = list(entity.weights) if entity.weights else None
+                degree  = entity.dxf.degree
+                bsp     = BSpline(ctrl, order=degree+1, knots=knots, weights=weights)
+                t0, t1  = knots[degree], knots[-(degree+1)]
+                n_pts   = max(256, len(ctrl) * 6)
+                pts_xy  = []
+                for t in np.linspace(t0, t1, n_pts, endpoint=False):
+                    p = bsp.point(t)
+                    pts_xy.append((p.x, p.y))
+                pts_xy.append(pts_xy[0])
+                poly = Polygon(pts_xy)
             else:
                 pts = list(make_path(entity).flattening(distance=0.05))
                 if len(pts) < 3: continue
                 poly = Polygon([(p.x, p.y) for p in pts])
-                if not poly.is_valid: poly = poly.buffer(0)
-            if poly.is_valid and not poly.is_empty and poly.area > 0.01:
-                all_polys.append(poly)
-        except: continue
+        else:
+            pts = list(make_path(entity).flattening(distance=0.05))
+            if len(pts) < 3: continue
+            poly = Polygon([(p.x, p.y) for p in pts])
+        if not poly.is_valid: poly = poly.buffer(0)
+        if poly.is_valid and not poly.is_empty and poly.area > 0.01:
+            all_polys.append(poly)
+    except Exception as e:
+        print(f"[ERROR] {entity.dxftype()} failed: {e}")
+        continue
     if not all_polys: raise ValueError("找不到有效輪廓")
     all_polys.sort(key=lambda p: p.area, reverse=True)
     shell = all_polys[0]
@@ -476,7 +503,9 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0)
 
         # FIX 2: 使用 offset_dist 取代寫死的 2
         try:
-            op = poly.buffer(offset_dist, join_style=2)
+            op = poly.buffer(offset_dist, join_style=1, quad_segs=16)
+            if op.geom_type == 'MultiPolygon':
+                op = max(op.geoms, key=lambda g: g.area)
             oc = list(op.exterior.coords)
             for i in range(len(oc)-1):
                 lines.append({"id":str(uuid.uuid4()), "type":"offset", "kind":"line",
