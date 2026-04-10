@@ -1398,13 +1398,18 @@ function bridgeDrawAll(){
       ctx.lineTo(tx(l.coords[1][0]),ty(l.coords[1][1]));
     }
     if(isS){ ctx.strokeStyle='#ffffff';ctx.lineWidth=dw*3;ctx.shadowBlur=0; }
-    else if(isH){ ctx.strokeStyle=st.g;ctx.lineWidth=dw*2.5;ctx.shadowBlur=6;ctx.shadowColor=st.g; }
+    else if(isH){
+      const erasing=bridgeState.currentMode==='erase'||bridgeState.currentMode==='erase-array';
+      const hCol=erasing?'#ff6060':st.g;
+      ctx.strokeStyle=hCol;ctx.lineWidth=dw*2.5;ctx.shadowBlur=6;ctx.shadowColor=hCol;
+    }
     else if(l.type==='offset'){ ctx.strokeStyle=st.n;ctx.lineWidth=Math.max(0.8,dw*0.85);ctx.shadowBlur=0; }
     else { ctx.strokeStyle=st.n;ctx.lineWidth=dw;ctx.shadowBlur=0; }
     ctx.stroke();ctx.shadowBlur=0;
   });
   connectors.forEach((b,i)=>{
-    const isHov = (i===bridgeState.hoverConnector && bridgeState.eraserMode);
+    const isEraseMode = bridgeState.currentMode==='erase'||bridgeState.currentMode==='erase-array';
+    const isHov = (i===bridgeState.hoverConnector && isEraseMode);
     ctx.strokeStyle = isHov ? '#ff6060' : '#e0e0e0';
     ctx.lineWidth = dw * (isHov ? 2.5 : 1.5);
     if(isHov){ ctx.shadowBlur=8; ctx.shadowColor='#ff6060'; }
