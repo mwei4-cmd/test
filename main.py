@@ -168,14 +168,41 @@ def get_full_polygon_with_holes(file_path, target_doc=None):
             if entity.dxftype() == 'CIRCLE':
                 c = entity.dxf.center
                 poly = Point(c.x, c.y).buffer(entity.dxf.radius, quad_segs=32)
+            elif entity.dxftype() == 'SPLINE':
+                spline_flags = entity.dxf.flags if entity.dxf.hasattr('flags') else 0
+                is_closed   = bool(spline_flags & 1)
+                is_rational = bool(spline_flags & 4)
+                has_ctrl    = len(list(entity.control_points)) > 0
+                if is_rational and is_closed and has_ctrl:
+                    from ezdxf.math import BSpline
+                    import numpy as np
+                    ctrl    = [(float(p[0]), float(p[1])) for p in entity.control_points]
+                    knots   = list(entity.knots)
+                    weights = list(entity.weights) if entity.weights else None
+                    degree  = entity.dxf.degree
+                    bsp     = BSpline(ctrl, order=degree+1, knots=knots, weights=weights)
+                    t0, t1  = knots[degree], knots[-(degree+1)]
+                    n_pts   = max(256, len(ctrl) * 6)
+                    pts_xy  = []
+                    for t in np.linspace(t0, t1, n_pts, endpoint=False):
+                        p = bsp.point(t)
+                        pts_xy.append((p.x, p.y))
+                    pts_xy.append(pts_xy[0])
+                    poly = Polygon(pts_xy)
+                else:
+                    pts = list(make_path(entity).flattening(distance=0.05))
+                    if len(pts) < 3: continue
+                    poly = Polygon([(p.x, p.y) for p in pts])
             else:
                 pts = list(make_path(entity).flattening(distance=0.05))
                 if len(pts) < 3: continue
                 poly = Polygon([(p.x, p.y) for p in pts])
-                if not poly.is_valid: poly = poly.buffer(0)
+            if not poly.is_valid: poly = poly.buffer(0)
             if poly.is_valid and not poly.is_empty and poly.area > 0.01:
                 all_polys.append(poly)
-        except: continue
+        except Exception as e:
+            print(f"[ERROR] {entity.dxftype()} failed: {e}")
+            continue
     if not all_polys: raise ValueError("找不到有效輪廓")
     all_polys.sort(key=lambda p: p.area, reverse=True)
     shell = all_polys[0]
@@ -219,6 +246,231 @@ def refine_position(poly_a, poly_b, init_dx, init_dy, target_dist):
         else:
             no_improve_count = 0
     return best_dx, best_dy, best_b, best_area
+
+# ── 形狀感知壓縮：排版後推擠每對相鄰形狀 ──────────────────────────────────────
+def compact_layout(fps, spacing, mode="Matrix"):
+    if len(fps) < 2:
+        return fps
+
+    polys = [p for p, a, f, c in fps]
+    angs  = [a for p, a, f, c in fps]
+    flags = [f for p, a, f, c in fps]
+
+    TOL = 0.01  # mm 精度
+
+    def push_x(pa, pb):
+        """將 pb 往左推到 pa 與 pb 實際距離 == spacing 的位置，回傳新 pb。"""
+        # 先確認 pb 在 pa 右邊
+        if pb.bounds[0] < pa.bounds[2] - 0.1:
+            return pb  # 非右鄰，跳過
+        # 目前間距
+        cur_dist = pa.distance(pb)
+        if cur_dist <= spacing + TOL:
+            return pb  # 已夠緊
+        # binary search：往左移 shift，使距離趨近 spacing
+        lo, hi = 0.0, cur_dist - spacing
+        for _ in range(20):
+            mid = (lo + hi) / 2
+            pb_test = translate(pb, -mid, 0)
+            d = pa.distance(pb_test)
+            if d < spacing:
+                hi = mid
+            else:
+                lo = mid
+        shift = lo
+        return translate(pb, -shift, 0)
+
+    def push_y(pa, pb):
+        """將 pb 往下推到 pa 與 pb 實際距離 == spacing 的位置，回傳新 pb。"""
+        if pb.bounds[1] < pa.bounds[3] - 0.1:
+            return pb
+        cur_dist = pa.distance(pb)
+        if cur_dist <= spacing + TOL:
+            return pb
+        lo, hi = 0.0, cur_dist - spacing
+        for _ in range(20):
+            mid = (lo + hi) / 2
+            pb_test = translate(pb, 0, -mid)
+            d = pa.distance(pb_test)
+            if d < spacing:
+                hi = mid
+            else:
+                lo = mid
+        shift = lo
+        return translate(pb, 0, -shift)
+
+    # ── Nesting 模式：pair 為單位（兩兩一對視為一個 unit）──────────────────
+    if "Nesting" in mode:
+        # Nesting 每對 (2k, 2k+1) 視為一個 unit，對 unit 整體做 X/Y 推擠
+        pair_count = len(polys) // 2
+        units = []
+        for i in range(pair_count):
+            pa, pb = polys[i*2], polys[i*2+1]
+            units.append(unary_union([pa, pb]))
+
+        # 用 bounds 猜測 rows/cols 結構
+        unit_bounds = [u.bounds for u in units]
+        # 依 y 分組（row），容差用 unit 高度的 40%
+        sorted_units = sorted(range(len(units)), key=lambda i: (round(units[i].centroid.y, 0), round(units[i].centroid.x, 0)))
+        rows = _group_by_coord([units[i].centroid.y for i in sorted_units], tol=30)
+
+        new_unit_positions = [None] * len(units)
+        # 先做 X 壓縮（同 row）
+        for row_idxs in rows:
+            orig_idxs = [sorted_units[i] for i in row_idxs]
+            orig_idxs_sorted = sorted(orig_idxs, key=lambda i: units[i].centroid.x)
+            cur_units = [units[i] for i in orig_idxs_sorted]
+            for j in range(1, len(cur_units)):
+                cur_units[j] = _push_shape_x(cur_units[j-1], cur_units[j], spacing, TOL)
+            for j, idx in enumerate(orig_idxs_sorted):
+                new_unit_positions[idx] = cur_units[j]
+
+        # 再做 Y 壓縮（同 col）
+        sorted_by_x = sorted(range(len(units)), key=lambda i: (round(units[i].centroid.x, 0), round(units[i].centroid.y, 0)))
+        cols = _group_by_coord([units[sorted_by_x[i]].centroid.x for i in range(len(units))], tol=30)
+        for col_idxs in cols:
+            orig_idxs = [sorted_by_x[i] for i in col_idxs]
+            orig_idxs_sorted = sorted(orig_idxs, key=lambda i: new_unit_positions[i].centroid.y)
+            cur_units = [new_unit_positions[i] for i in orig_idxs_sorted]
+            for j in range(1, len(cur_units)):
+                cur_units[j] = _push_shape_y(cur_units[j-1], cur_units[j], spacing, TOL)
+            for j, idx in enumerate(orig_idxs_sorted):
+                new_unit_positions[idx] = cur_units[j]
+
+        # 將 unit 的平移量反算回每個 poly
+        new_polys = list(polys)
+        for i in range(pair_count):
+            orig_unit = unary_union([polys[i*2], polys[i*2+1]])
+            new_unit  = new_unit_positions[i]
+            dx = new_unit.centroid.x - orig_unit.centroid.x
+            dy = new_unit.centroid.y - orig_unit.centroid.y
+            new_polys[i*2]   = translate(polys[i*2],   dx, dy)
+            new_polys[i*2+1] = translate(polys[i*2+1], dx, dy)
+
+    else:
+        # ── Matrix / V-Cut：重寫分群邏輯 ────────────────────────────────
+        new_polys = list(polys)
+
+        # 用 bounding box 中心做分群，容差用形狀高度的一半
+        heights = [p.bounds[3] - p.bounds[1] for p in polys]
+        widths  = [p.bounds[2] - p.bounds[0] for p in polys]
+        avg_h = sum(heights) / len(heights)
+        avg_w = sum(widths)  / len(widths)
+        row_tol = avg_h * 0.5
+        col_tol = avg_w * 0.5
+
+        # ── X 方向壓縮：先按 Y 分 row，同 row 內由左到右推擠 ──
+        # 按 centroid.y 排序找 row 群組
+        by_y = sorted(range(len(polys)), key=lambda i: new_polys[i].centroid.y)
+        rows = []
+        cur_row = [by_y[0]]
+        for k in range(1, len(by_y)):
+            i, j = by_y[k], by_y[k-1]
+            if abs(new_polys[i].centroid.y - new_polys[j].centroid.y) < row_tol:
+                cur_row.append(by_y[k])
+            else:
+                rows.append(cur_row)
+                cur_row = [by_y[k]]
+        rows.append(cur_row)
+
+        for row in rows:
+            row_sorted = sorted(row, key=lambda i: new_polys[i].centroid.x)
+            for k in range(1, len(row_sorted)):
+                prev_idx = row_sorted[k-1]
+                curr_idx = row_sorted[k]
+                new_polys[curr_idx] = _push_shape_x(
+                    new_polys[prev_idx], new_polys[curr_idx], spacing, TOL)
+
+       # Y 壓縮：按 X 分 col，同 col 內由下到上推擠
+        by_x = sorted(range(len(polys)), key=lambda i: new_polys[i].centroid.x)  # 用 new_polys
+        cols = []
+        cur_col = [by_x[0]]
+        for k in range(1, len(by_x)):
+            i, j = by_x[k], by_x[k-1]
+            if abs(new_polys[i].centroid.x - new_polys[j].centroid.x) < col_tol:  # 用 new_polys
+                cur_col.append(by_x[k])
+            else:
+                cols.append(cur_col)
+                cur_col = [by_x[k]]
+        cols.append(cur_col)
+
+        for col in cols:
+            col_sorted = sorted(col, key=lambda i: new_polys[i].centroid.y)  # 用 new_polys
+            for k in range(1, len(col_sorted)):
+                prev_idx = col_sorted[k-1]
+                curr_idx = col_sorted[k]
+                new_polys[curr_idx] = _push_shape_y(
+                    new_polys[prev_idx], new_polys[curr_idx], spacing, TOL)
+
+    # 重建 fps
+    new_fps = []
+    for i, (p, a, f, c) in enumerate(fps):
+        np_ = new_polys[i]
+        new_fps.append((np_, a, f, (np_.centroid.x, np_.centroid.y)))
+    return new_fps
+
+
+def _group_by_coord(coords, tol=30):
+    """將座標列依容差分群，回傳 index groups。"""
+    if not coords:
+        return []
+    indexed = sorted(enumerate(coords), key=lambda x: x[1])
+    groups = [[indexed[0][0]]]
+    for idx, val in indexed[1:]:
+        if abs(val - coords[groups[-1][-1]]) < tol:
+            groups[-1].append(idx)
+        else:
+            groups.append([idx])
+    return groups
+
+
+def _push_shape_x(pa, pb, spacing, tol=0.01):
+    if pb.bounds[0] < pa.bounds[2] - 0.1:
+        return pb
+    cur_dist = pa.distance(pb)
+    if cur_dist <= spacing + tol:
+        return pb
+    # 安全上限：最多移 cur_dist - spacing，不能更多
+    max_shift = cur_dist - spacing
+    if max_shift <= 0:
+        return pb
+    lo, hi = 0.0, max_shift
+    for _ in range(24):
+        mid = (lo + hi) / 2
+        pb_test = translate(pb, -mid, 0)
+        # 若重疊或距離太近，退回
+        if pa.distance(pb_test) < spacing - tol:
+            hi = mid
+        else:
+            lo = mid
+    # 最終安全驗證：確認沒有重疊
+    result = translate(pb, -lo, 0)
+    if pa.distance(result) < spacing - tol:
+        return pb  # 有問題就放棄推擠，保留原位
+    return result
+
+
+def _push_shape_y(pa, pb, spacing, tol=0.01):
+    if pb.bounds[1] < pa.bounds[3] - 0.1:
+        return pb
+    cur_dist = pa.distance(pb)
+    if cur_dist <= spacing + tol:
+        return pb
+    max_shift = cur_dist - spacing
+    if max_shift <= 0:
+        return pb
+    lo, hi = 0.0, max_shift
+    for _ in range(24):
+        mid = (lo + hi) / 2
+        pb_test = translate(pb, 0, -mid)
+        if pa.distance(pb_test) < spacing - tol:
+            hi = mid
+        else:
+            lo = mid
+    result = translate(pb, 0, -lo)
+    if pa.distance(result) < spacing - tol:
+        return pb
+    return result
 
 # ── FIX 1: 原本的排版邏輯抽出為 _run_nesting_single ──────────────────────────
 def _run_nesting_single(raw_poly, params, progress_cb=None):
@@ -476,12 +728,14 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0)
 
         # FIX 2: 使用 offset_dist 取代寫死的 2
         try:
-            op = poly.buffer(offset_dist, join_style=2)
+            op = poly.buffer(offset_dist, join_style=1, quad_segs=16)
+            if op.geom_type == 'MultiPolygon':
+                op = max(op.geoms, key=lambda g: g.area)
             oc = list(op.exterior.coords)
             for i in range(len(oc)-1):
                 lines.append({"id":str(uuid.uuid4()), "type":"offset", "kind":"line",
-                               "coords":[[round(oc[i][0],4),round(oc[i][1],4)],
-                                         [round(oc[i+1][0],4),round(oc[i+1][1],4)]]})
+                            "coords":[[round(oc[i][0],4),round(oc[i][1],4)],
+                                        [round(oc[i+1][0],4),round(oc[i+1][1],4)]]})
         except: pass
 
     return lines
@@ -561,11 +815,18 @@ def compute_gaps(fp, mode, bsw, bsh, raw_poly, spacing):
 
         return gap_x, gap_y, None
 
+def _translate_fps(fps, dx, dy):
+    result = []
+    for p, a, f, c in fps:
+        np_ = translate(p, dx, dy)
+        result.append((np_, a, f, (np_.centroid.x, np_.centroid.y)))
+    return result
 
 def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, doc_out, raw_poly):
     cw, ch = params["panel_w"], params["panel_h"]
     lb, rb, ub, db = params["left"], params["right"], params["top"], params["bottom"]
     spacing = params["spacing"]
+    mode = params.get("mode", "")
     r_corner = params.get("corner_r", 4.0)
     msp_out = doc_out.modelspace()
     p_w = raw_poly.bounds[2]-raw_poly.bounds[0]
@@ -574,17 +835,24 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
     all_u = unary_union([b for b,a,f,c in best_layout])
     fox = (cw/2) - all_u.centroid.x
     foy = (ch/2) - all_u.centroid.y
-    fps = [(translate(b,fox,foy),a,f,(c[0]+fox,c[1]+foy)) for b,a,f,c in best_layout]
-    fp = [p for p,a,f,c in fps]
+    fps = [(translate(b,fox,foy), a, f, (c[0]+fox, c[1]+foy)) for b,a,f,c in best_layout]
 
+    fps = compact_layout(fps, spacing, mode)
+
+    fp = [p for p,a,f,c in fps]
     fu = unary_union(fp)
     fx1,fy1,fx2,fy2 = fu.bounds
     compw = (fx2-fx1)+lb+rb
     comph = (fy2-fy1)+ub+db
     cox, coy = lb-fx1, db-fy1
-    fps = [(translate(p,cox,coy),a,f,(c[0]+cox,c[1]+coy)) for p,a,f,c in fps]
-    fp = [p for p,a,f,c in fps]
 
+    # 第二次平移：直接從 translate 後的 poly 取 centroid
+    new_fps = []
+    for p, a, f, c in fps:
+        np_ = translate(p, cox, coy)
+        new_fps.append((np_, a, f, (np_.centroid.x, np_.centroid.y)))
+    fps = new_fps
+    fp = [p for p,a,f,c in fps]
     for poly, ang, _, (ax, ay) in fps:
         msp_out.add_blockref(geo_block_name, (ax, ay), dxfattribs={
             'rotation': ang, 'xscale': 1.0, 'yscale': 1.0,
@@ -1303,6 +1571,7 @@ async def adjust(data: dict):
     bsh     = SESSION.get('best_step_h', 0)
     bcc     = SESSION.get('best_count_col', 0)
     bcr     = SESSION.get('best_count_row', 0)
+    
     params  = SESSION.get('last_params')
     raw     = SESSION.get('raw_poly')
     block_name  = SESSION.get('geo_block_name')
@@ -1440,8 +1709,6 @@ async def download_bridge_dxf():
     compw = SESSION.get('compressed_w', 162.5)
     comph = SESSION.get('compressed_h', 190.5)
     fps   = SESSION.get('final_polys_with_info', [])
-    src_doc = SESSION.get('doc_out')
-    block_name = SESSION.get('geo_block_name', 'PART_GEO_BLOCK')
     R_corner, r_fix = 4.0, 2.0
 
     doc = ezdxf.new('R2010'); doc.header['$INSUNITS'] = 4
@@ -1449,23 +1716,23 @@ async def download_bridge_dxf():
     for lname, col in [('PARTS',7),('OFFSETS',4),('BRIDGES',2),('FRAME',7)]:
         doc.layers.new(lname, dxfattribs={'color': col})
 
-    if src_doc and block_name in src_doc.blocks:
-        src_block = src_doc.blocks[block_name]
-        new_block = doc.blocks.new(name=block_name)
-        for ent in src_block:
-            try: new_block.add_entity(ent.copy())
-            except: pass
+    # PARTS：直接從 fps 的 poly 幾何畫線，不用 blockref
+    # PARTS：lwpolyline，檔案小
+    for poly, ang, _, _ in fps:
+        ec = list(poly.exterior.coords)
+        msp.add_lwpolyline(ec, dxfattribs={'layer': 'PARTS', 'closed': True})
+        for hole in poly.interiors:
+            hc = list(hole.coords)
+            msp.add_lwpolyline(hc, dxfattribs={'layer': 'PARTS', 'closed': True})
 
-    for poly, ang, _, (ax, ay) in fps:
-        msp.add_blockref(block_name, (ax, ay), dxfattribs={
-            'rotation': ang, 'xscale': 1.0, 'yscale': 1.0,
-            'layer': 'PARTS', 'color': 7})
-
+    # OFFSETS：從 interactive_lines 讀，保留打斷
     for ld in SESSION.get('interactive_lines', []):
-        if ld['type'] == 'offset':
-            msp.add_line(ld['coords'][0], ld['coords'][1],
-                         dxfattribs={'layer': 'OFFSETS'})
+        if ld.get('type') == 'offset':
+            coords = ld.get('coords', [])
+            if len(coords) == 2:
+                msp.add_line(coords[0], coords[1], dxfattribs={'layer': 'OFFSETS'})
 
+    # BRIDGES（不變）
     for b in SESSION.get('manual_connectors', []):
         if b.get('type') == 'precise_sandglass_arc':
             t = b['ang']
@@ -1476,6 +1743,7 @@ async def download_bridge_dxf():
                         start_angle=t+90, end_angle=t+270,
                         dxfattribs={'layer': 'BRIDGES'})
 
+    # FRAME（不變）
     centers = [(R_corner, R_corner), (compw-R_corner, R_corner),
                (compw-R_corner, comph-R_corner), (R_corner, comph-R_corner)]
     msp.add_line((R_corner, 0),      (compw-R_corner, 0),      dxfattribs={'layer': 'FRAME'})
