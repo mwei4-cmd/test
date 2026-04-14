@@ -1554,15 +1554,21 @@ function setStatus(msg){document.getElementById('bridge-status').textContent=msg
 async function doBridge(idx1,pt1,idx2){
   setStatus('Computing...');
   const bridge_w = parseFloat(document.getElementById('bridge-w').value) || 3.5;
-  const r=await fetch('/bridge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idx1,pt1:[pt1.x,pt1.y],idx2,bridge_w})});
-  const d=await r.json();
+  const is_array = bridgeState.currentMode === 'bridge-array';   // ← NEW
+  const r = await fetch('/bridge', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({idx1, pt1:[pt1.x,pt1.y], idx2, bridge_w, is_array})   // ← NEW
+  });
+  const d = await r.json();
   if(!d.ok){setStatus('Error: '+d.error);return;}
-  bridgeState.lines=d.lines; bridgeState.connectors=d.connectors;
+  bridgeState.lines = d.lines;
+  bridgeState.connectors = d.connectors;
   bridgeDrawAll();
-  // bridge-array 模式：自動 propagate
-  if(bridgeState.currentMode==='bridge-array'){
+  if(bridgeState.currentMode === 'bridge-array'){
     setStatus('Bridge placed — propagating to all copies…');
-    await propagateBridge();
+    // 只傳本次新建的橋的 id，後端只陣列這一個
+    await propagateBridge(d.new_connector_id ? [d.new_connector_id] : null);
   } else {
     setStatus('Bridge added — total: '+d.connectors.length);
   }
@@ -1598,11 +1604,20 @@ function resetPropagateState(){
   if(badge){ badge.style.display='none'; badge.textContent=''; }
 }
 
-async function propagateBridge(){
+
+async function propagateBridge(connectorIds){
   const badge = document.getElementById('prop-badge');
   setStatus('Propagating bridges to all copies…');
   try {
-    const r = await fetch('/propagate_bridge', {method:'POST'});
+    // connectorIds = array of ids to propagate, or null/undefined = propagate all
+    const body = connectorIds
+      ? JSON.stringify({connector_ids: connectorIds})
+      : '{}';
+    const r = await fetch('/propagate_bridge', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body
+    });
     const d = await r.json();
     if(!d.ok){ setStatus('Propagate failed: '+(d.error||'unknown error')); return; }
     bridgeState.lines = d.lines;
@@ -1620,6 +1635,7 @@ async function propagateBridge(){
     setStatus('Propagate error: '+e.message);
   }
 }
+ 
 
 function downloadNest(){window.location='/download_nest_dxf';}
 function downloadBridge(){window.location='/download_bridge_dxf';}
