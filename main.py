@@ -146,14 +146,42 @@ async def sheet_calculate(request: Request):
         return JSONResponse({"error": str(e), "detail": tb}, status_code=500)
 
 # ── In-memory session ──────────────────────────────────────────────────────────
+# FIX: Split manual_connectors into source_connectors + propagated_connectors
+# source_connectors  = bridges placed directly by the user (single or first of ×All)
+# propagated_connectors = copies created by propagate; rebuilt from scratch each time
+# manual_connectors  = source + propagated (what the canvas and DXF export see)
+# base_lines         = the clean line state BEFORE any bridge was cut
+#                      (rebuilt whenever source_connectors changes)
 SESSION = {
     "raw_poly": None, "geo_block_name": None, "doc_out": None,
     "best_layout": [], "best_step_w": 0, "best_step_h": 0,
     "best_count_col": 0, "best_count_row": 0,
     "final_polys_with_info": [], "stats": {},
-    "interactive_lines": [], "manual_connectors": [],
-    "lines_history": [],
+    # NEW bridge state management
+    "base_lines": [],            # lines with NO bridges cut (reset-to-clean state)
+    "interactive_lines": [],     # lines with source bridge cuts applied
+    "source_connectors": [],     # hand-placed bridges only
+    "propagated_connectors": [], # copies from last propagate
+    "manual_connectors": [],     # source + propagated (combined view)
+    "lines_history": [],         # undo stack (snapshots of interactive_lines + source_connectors)
 }
+
+
+def _rebuild_manual_connectors():
+    """Keep manual_connectors = source + propagated."""
+    SESSION["manual_connectors"] = (
+        list(SESSION["source_connectors"]) +
+        list(SESSION["propagated_connectors"])
+    )
+
+
+def _serialize_connectors(conns):
+    return [
+        {"id": c.get("id", ""), "lx": c["lx"], "ly": c["ly"],
+         "rx": c["rx"], "ry": c["ry"], "r": c["r"], "ang": c["ang"]}
+        for c in conns
+    ]
+
 
 # ── Geometry helpers ───────────────────────────────────────────────────────────
 def get_full_polygon_with_holes(file_path, target_doc=None):
@@ -259,15 +287,11 @@ def compact_layout(fps, spacing, mode="Matrix"):
     TOL = 0.01  # mm 精度
 
     def push_x(pa, pb):
-        """將 pb 往左推到 pa 與 pb 實際距離 == spacing 的位置，回傳新 pb。"""
-        # 先確認 pb 在 pa 右邊
         if pb.bounds[0] < pa.bounds[2] - 0.1:
-            return pb  # 非右鄰，跳過
-        # 目前間距
+            return pb
         cur_dist = pa.distance(pb)
         if cur_dist <= spacing + TOL:
-            return pb  # 已夠緊
-        # binary search：往左移 shift，使距離趨近 spacing
+            return pb
         lo, hi = 0.0, cur_dist - spacing
         for _ in range(20):
             mid = (lo + hi) / 2
@@ -281,7 +305,6 @@ def compact_layout(fps, spacing, mode="Matrix"):
         return translate(pb, -shift, 0)
 
     def push_y(pa, pb):
-        """將 pb 往下推到 pa 與 pb 實際距離 == spacing 的位置，回傳新 pb。"""
         if pb.bounds[1] < pa.bounds[3] - 0.1:
             return pb
         cur_dist = pa.distance(pb)
@@ -299,23 +322,18 @@ def compact_layout(fps, spacing, mode="Matrix"):
         shift = lo
         return translate(pb, 0, -shift)
 
-    # ── Nesting 模式：pair 為單位（兩兩一對視為一個 unit）──────────────────
     if "Nesting" in mode:
-        # Nesting 每對 (2k, 2k+1) 視為一個 unit，對 unit 整體做 X/Y 推擠
         pair_count = len(polys) // 2
         units = []
         for i in range(pair_count):
             pa, pb = polys[i*2], polys[i*2+1]
             units.append(unary_union([pa, pb]))
 
-        # 用 bounds 猜測 rows/cols 結構
         unit_bounds = [u.bounds for u in units]
-        # 依 y 分組（row），容差用 unit 高度的 40%
         sorted_units = sorted(range(len(units)), key=lambda i: (round(units[i].centroid.y, 0), round(units[i].centroid.x, 0)))
         rows = _group_by_coord([units[i].centroid.y for i in sorted_units], tol=30)
 
         new_unit_positions = [None] * len(units)
-        # 先做 X 壓縮（同 row）
         for row_idxs in rows:
             orig_idxs = [sorted_units[i] for i in row_idxs]
             orig_idxs_sorted = sorted(orig_idxs, key=lambda i: units[i].centroid.x)
@@ -325,7 +343,6 @@ def compact_layout(fps, spacing, mode="Matrix"):
             for j, idx in enumerate(orig_idxs_sorted):
                 new_unit_positions[idx] = cur_units[j]
 
-        # 再做 Y 壓縮（同 col）
         sorted_by_x = sorted(range(len(units)), key=lambda i: (round(units[i].centroid.x, 0), round(units[i].centroid.y, 0)))
         cols = _group_by_coord([units[sorted_by_x[i]].centroid.x for i in range(len(units))], tol=30)
         for col_idxs in cols:
@@ -337,7 +354,6 @@ def compact_layout(fps, spacing, mode="Matrix"):
             for j, idx in enumerate(orig_idxs_sorted):
                 new_unit_positions[idx] = cur_units[j]
 
-        # 將 unit 的平移量反算回每個 poly
         new_polys = list(polys)
         for i in range(pair_count):
             orig_unit = unary_union([polys[i*2], polys[i*2+1]])
@@ -348,10 +364,8 @@ def compact_layout(fps, spacing, mode="Matrix"):
             new_polys[i*2+1] = translate(polys[i*2+1], dx, dy)
 
     else:
-        # ── Matrix / V-Cut：重寫分群邏輯 ────────────────────────────────
         new_polys = list(polys)
 
-        # 用 bounding box 中心做分群，容差用形狀高度的一半
         heights = [p.bounds[3] - p.bounds[1] for p in polys]
         widths  = [p.bounds[2] - p.bounds[0] for p in polys]
         avg_h = sum(heights) / len(heights)
@@ -359,8 +373,6 @@ def compact_layout(fps, spacing, mode="Matrix"):
         row_tol = avg_h * 0.5
         col_tol = avg_w * 0.5
 
-        # ── X 方向壓縮：先按 Y 分 row，同 row 內由左到右推擠 ──
-        # 按 centroid.y 排序找 row 群組
         by_y = sorted(range(len(polys)), key=lambda i: new_polys[i].centroid.y)
         rows = []
         cur_row = [by_y[0]]
@@ -381,13 +393,12 @@ def compact_layout(fps, spacing, mode="Matrix"):
                 new_polys[curr_idx] = _push_shape_x(
                     new_polys[prev_idx], new_polys[curr_idx], spacing, TOL)
 
-       # Y 壓縮：按 X 分 col，同 col 內由下到上推擠
-        by_x = sorted(range(len(polys)), key=lambda i: new_polys[i].centroid.x)  # 用 new_polys
+        by_x = sorted(range(len(polys)), key=lambda i: new_polys[i].centroid.x)
         cols = []
         cur_col = [by_x[0]]
         for k in range(1, len(by_x)):
             i, j = by_x[k], by_x[k-1]
-            if abs(new_polys[i].centroid.x - new_polys[j].centroid.x) < col_tol:  # 用 new_polys
+            if abs(new_polys[i].centroid.x - new_polys[j].centroid.x) < col_tol:
                 cur_col.append(by_x[k])
             else:
                 cols.append(cur_col)
@@ -395,14 +406,13 @@ def compact_layout(fps, spacing, mode="Matrix"):
         cols.append(cur_col)
 
         for col in cols:
-            col_sorted = sorted(col, key=lambda i: new_polys[i].centroid.y)  # 用 new_polys
+            col_sorted = sorted(col, key=lambda i: new_polys[i].centroid.y)
             for k in range(1, len(col_sorted)):
                 prev_idx = col_sorted[k-1]
                 curr_idx = col_sorted[k]
                 new_polys[curr_idx] = _push_shape_y(
                     new_polys[prev_idx], new_polys[curr_idx], spacing, TOL)
 
-    # 重建 fps
     new_fps = []
     for i, (p, a, f, c) in enumerate(fps):
         np_ = new_polys[i]
@@ -411,7 +421,6 @@ def compact_layout(fps, spacing, mode="Matrix"):
 
 
 def _group_by_coord(coords, tol=30):
-    """將座標列依容差分群，回傳 index groups。"""
     if not coords:
         return []
     indexed = sorted(enumerate(coords), key=lambda x: x[1])
@@ -430,7 +439,6 @@ def _push_shape_x(pa, pb, spacing, tol=0.01):
     cur_dist = pa.distance(pb)
     if cur_dist <= spacing + tol:
         return pb
-    # 安全上限：最多移 cur_dist - spacing，不能更多
     max_shift = cur_dist - spacing
     if max_shift <= 0:
         return pb
@@ -438,15 +446,13 @@ def _push_shape_x(pa, pb, spacing, tol=0.01):
     for _ in range(24):
         mid = (lo + hi) / 2
         pb_test = translate(pb, -mid, 0)
-        # 若重疊或距離太近，退回
         if pa.distance(pb_test) < spacing - tol:
             hi = mid
         else:
             lo = mid
-    # 最終安全驗證：確認沒有重疊
     result = translate(pb, -lo, 0)
     if pa.distance(result) < spacing - tol:
-        return pb  # 有問題就放棄推擠，保留原位
+        return pb
     return result
 
 
@@ -472,7 +478,7 @@ def _push_shape_y(pa, pb, spacing, tol=0.01):
         return pb
     return result
 
-# ── FIX 1: 原本的排版邏輯抽出為 _run_nesting_single ──────────────────────────
+
 def _run_nesting_single(raw_poly, params, progress_cb=None):
     cw, ch = params["panel_w"], params["panel_h"]
     lb, rb, ub, db = params["left"], params["right"], params["top"], params["bottom"]
@@ -599,16 +605,13 @@ def _run_nesting_single(raw_poly, params, progress_cb=None):
     return best_layout, bsw, bsh, bcc, bcr, candidates_top3
 
 
-# ── FIX 1: 新的 run_nesting 自動跑正反兩種方向取最佳 ─────────────────────────
 def run_nesting(raw_poly, params, progress_cb=None):
-    # 方向 A：照使用者輸入
     def cb_a(pct):
         if progress_cb: progress_cb(pct * 0.5)
 
     result_a = _run_nesting_single(raw_poly, params, cb_a)
     count_a  = len(result_a[0])
 
-    # 方向 B：交換 W/H（只有非正方形才跑）
     swapped = abs(params["panel_w"] - params["panel_h"]) > 0.01
     result_b = None
     count_b  = -1
@@ -625,7 +628,6 @@ def run_nesting(raw_poly, params, progress_cb=None):
     else:
         if progress_cb: progress_cb(1.0)
 
-    # 取勝者
     if result_b is not None and count_b > count_a:
         print(f"[Nesting] 交換方向勝出: {count_b} > {count_a} pcs")
         params["panel_w"] = params_b["panel_w"]
@@ -636,7 +638,6 @@ def run_nesting(raw_poly, params, progress_cb=None):
         return result_a
 
 
-# ── FIX 2: offset_dist 改為參數，不再寫死 2mm ────────────────────────────────
 def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0):
     import math as _math
 
@@ -726,9 +727,8 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0)
                                "coords":[[round(ec[i][0],4),round(ec[i][1],4)],
                                          [round(ec[i+1][0],4),round(ec[i+1][1],4)]]})
 
-        # FIX 2: 使用 offset_dist 取代寫死的 2
         try:
-            op = poly.buffer(offset_dist, join_style=1, quad_segs=16)
+            op = poly.buffer(offset_dist, join_style=2)
             if op.geom_type == 'MultiPolygon':
                 op = max(op.geoms, key=lambda g: g.area)
             oc = list(op.exterior.coords)
@@ -846,7 +846,6 @@ def build_output_data(best_layout, bsw, bsh, bcc, bcr, params, geo_block_name, d
     comph = (fy2-fy1)+ub+db
     cox, coy = lb-fx1, db-fy1
 
-    # 第二次平移：直接從 translate 後的 poly 取 centroid
     new_fps = []
     for p, a, f, c in fps:
         np_ = translate(p, cox, coy)
@@ -975,7 +974,6 @@ def calculate_bridge(data, lines, connectors, gap_half=1.75, r=1.0):
     new_lines += cut_segs_1
     new_lines += cut_segs_2
 
-    # 記錄原始線段與切割產生的 id，供刪除時補回
     cut_ids = [s['id'] for s in cut_segs_1 + cut_segs_2]
     orig_l1 = dict(l1, id=str(uuid.uuid4()))
     orig_l2 = dict(l2, id=str(uuid.uuid4()))
@@ -1001,7 +999,6 @@ def delete_bridge(connector_id, lines, connectors):
         raise ValueError(f"connector {connector_id} not found")
     cut_ids = set(target.get('cut_ids', []))
     new_lines = [l for l in lines if l['id'] not in cut_ids]
-    # 補回原始線段
     if target.get('orig_l1'):
         new_lines.append(target['orig_l1'])
     if target.get('orig_l2'):
@@ -1042,59 +1039,6 @@ def _find_owning_poly(connector, fp_list):
     return best_idx
 
 
-def propagate_bridge_nesting(connectors, fps):
-    if not connectors or not fps:
-        return connectors
-    fp_list = [p for p, a, f, c in fps]
-    if len(fp_list) < 2:
-        return connectors
-    pair_count = len(fp_list) // 2
-    pair_cx = []
-    pair_cy = []
-    for i in range(pair_count):
-        pa = fp_list[i * 2]
-        pb = fp_list[i * 2 + 1]
-        pair_cx.append((pa.centroid.x + pb.centroid.x) / 2)
-        pair_cy.append((pa.centroid.y + pb.centroid.y) / 2)
-    all_connectors = []
-    for c in connectors:
-        src_pair = _find_owning_pair(c, fp_list)
-        ref_cx, ref_cy = pair_cx[src_pair], pair_cy[src_pair]
-        for i in range(pair_count):
-            dx = pair_cx[i] - ref_cx
-            dy = pair_cy[i] - ref_cy
-            all_connectors.append({
-                'type': c['type'],
-                'lx': c['lx'] + dx, 'ly': c['ly'] + dy,
-                'rx': c['rx'] + dx, 'ry': c['ry'] + dy,
-                'r': c['r'], 'ang': c['ang']
-            })
-    return all_connectors
-
-
-def propagate_bridge_matrix_vcut(connectors, fps):
-    if not connectors or not fps:
-        return connectors
-    fp_list = [p for p, a, f, c in fps]
-    if len(fp_list) < 2:
-        return connectors
-    all_connectors = []
-    for c in connectors:
-        src_idx = _find_owning_poly(c, fp_list)
-        ref_cx = fp_list[src_idx].centroid.x
-        ref_cy = fp_list[src_idx].centroid.y
-        for poly in fp_list:
-            dx = poly.centroid.x - ref_cx
-            dy = poly.centroid.y - ref_cy
-            all_connectors.append({
-                'type': c['type'],
-                'lx': c['lx'] + dx, 'ly': c['ly'] + dy,
-                'rx': c['rx'] + dx, 'ry': c['ry'] + dy,
-                'r': c['r'], 'ang': c['ang']
-            })
-    return all_connectors
-
-
 # ── REST endpoints ─────────────────────────────────────────────────────────────
 @app.get("/")
 async def index():
@@ -1119,7 +1063,10 @@ async def upload_dxf(file: UploadFile = File(...)):
         SESSION['doc_out'] = doc_out
         SESSION['_src_dxf_path'] = tmp.name
         SESSION['_orig_cx_cy'] = orig_cxy
+        SESSION['base_lines'] = []
         SESSION['interactive_lines'] = []
+        SESSION['source_connectors'] = []
+        SESSION['propagated_connectors'] = []
         SESSION['manual_connectors'] = []
         SESSION['lines_history'] = []
         return {"ok": True, "holes": hole_count,
@@ -1156,7 +1103,6 @@ async def nest(params: dict):
             SESSION['doc_out'] = doc_out
             SESSION['geo_block_name'] = block_name
 
-            # FIX 1: 用 copy 避免 run_nesting 修改到原始 params
             params_copy = dict(params)
             bl, bsw, bsh, bcc, bcr, top3 = run_nesting(raw, params_copy, progress_cb)
             if not bl:
@@ -1176,11 +1122,14 @@ async def nest(params: dict):
             SESSION['stats'] = stats
             SESSION['compressed_w'] = compw
             SESSION['compressed_h'] = comph
+            # Reset all bridge state
+            SESSION['base_lines'] = []
             SESSION['interactive_lines'] = []
+            SESSION['source_connectors'] = []
+            SESSION['propagated_connectors'] = []
             SESSION['manual_connectors'] = []
             SESSION['lines_history'] = []
 
-            # FIX 2: 讀 spacing 傳給 offset
             offset_dist = float(params_copy.get("spacing", 2.0))
             if offset_dist <= 0:
                 offset_dist = 0.5
@@ -1211,7 +1160,6 @@ async def nest(params: dict):
                                           "coords":[[oc[i][0],oc[i][1]],[oc[i+1][0],oc[i+1][1]]],
                                           "type":"offset","kind":"line"})
                     except: pass
-            SESSION['interactive_lines'] = lines
 
             panel_geo = create_rounded_panel(compw, comph, params_copy.get('corner_r', 4.0))
             fc = list(panel_geo.exterior.coords)
@@ -1220,6 +1168,9 @@ async def nest(params: dict):
                                "coords":[[round(fc[i][0],4),round(fc[i][1],4)],
                                          [round(fc[i+1][0],4),round(fc[i+1][1],4)]],
                                "type":"frame","kind":"line"})
+
+            # Store clean base_lines (no bridges cut yet)
+            SESSION['base_lines'] = json.loads(json.dumps(lines))
             SESSION['interactive_lines'] = lines
 
             top3_data = []
@@ -1235,7 +1186,6 @@ async def nest(params: dict):
             payload = {"ok":True, "stats":stats, "polys":polys_data,
                        "top3":top3_data, "lines":lines,
                        "compressed_w":compw, "compressed_h":comph,
-                       # FIX 1: 回傳實際使用的 panel 尺寸
                        "panel_w": params_copy['panel_w'],
                        "panel_h": params_copy['panel_h']}
             progress_queue.put(("done", payload))
@@ -1266,178 +1216,266 @@ async def nest(params: dict):
     return SR(event_stream(), media_type="text/event-stream",
               headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bridge state helpers
+# Architecture:
+#   base_lines           clean lines with NO bridges (set after nest/adjust)
+#   source_connectors    bridges placed manually (Bridge or Bridge×All)
+#   propagated_connectors copies generated by the last propagate call
+#   interactive_lines    base_lines with ALL connectors cuts applied;
+#                        rebuilt from scratch by _apply_all_connectors_to_base
+#   manual_connectors    source + propagated (for canvas and DXF)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _apply_all_connectors_to_base():
+    """Recompute interactive_lines from scratch using base_lines + all connectors."""
+    lines = json.loads(json.dumps(SESSION["base_lines"]))
+    all_conns = list(SESSION["source_connectors"]) + list(SESSION["propagated_connectors"])
+    spacing = float(SESSION.get("last_params", {}).get("spacing", 2.0))
+    r_arc   = max(spacing / 2, 0.1)
+    for c in all_conns:
+        gap_half = math.sqrt((c["rx"]-c["lx"])**2 + (c["ry"]-c["ly"])**2) / 2
+        orig_l1 = c.get("orig_l1")
+        orig_l2 = c.get("orig_l2")
+        if not orig_l1 or not orig_l2:
+            continue
+        def match(target, lines=lines):
+                    tc = target.get("coords")
+                    if not tc:
+                        return -1
+                    # 目標線段的中點（切割點附近）
+                    tmx = (tc[0][0] + tc[1][0]) / 2
+                    tmy = (tc[0][1] + tc[1][1]) / 2
+                    # 目標線段的方向向量（用來確認同向）
+                    tdx = tc[1][0] - tc[0][0]
+                    tdy = tc[1][1] - tc[0][1]
+                    tlen = math.sqrt(tdx**2 + tdy**2)
+                    if tlen < 1e-9:
+                        return -1
+                    tux, tuy = tdx / tlen, tdy / tlen  # 單位向量
+
+                    best_i = -1
+                    best_d = 0.8  # 容許誤差 mm
+
+                    for i, l in enumerate(lines):
+                        if l.get("kind") == "arc":
+                            continue
+                        lc = l.get("coords", [])
+                        if len(lc) < 2:
+                            continue
+
+                        lx0, ly0 = lc[0][0], lc[0][1]
+                        lx1, ly1 = lc[1][0], lc[1][1]
+                        ldx, ldy = lx1 - lx0, ly1 - ly0
+                        ll = math.sqrt(ldx**2 + ldy**2)
+                        if ll < 1e-9:
+                            continue
+                        lux, luy = ldx / ll, ldy / ll
+
+                        # 方向必須相同（點積接近 ±1）
+                        dot = abs(tux * lux + tuy * luy)
+                        if dot < 0.97:
+                            continue
+
+                        # 目標線段的中點必須落在候選線段上（投影在 [0, ll] 範圍內）
+                        proj = (tmx - lx0) * lux + (tmy - ly0) * luy
+                        if proj < -best_d or proj > ll + best_d:
+                            continue
+
+                        # 中點到線段的垂直距離
+                        perp = abs((tmx - lx0) * luy - (tmy - ly0) * lux)
+                        if perp < best_d:
+                            best_d = perp
+                            best_i = i
+
+                    return best_i
+        idx1 = match(orig_l1)
+        idx2 = match(orig_l2)
+        if idx1 == -1 or idx2 == -1 or idx1 == idx2:
+            continue
+        smx = (c["lx"] + c["rx"]) / 2
+        smy = (c["ly"] + c["ry"]) / 2
+        data_fake = {"idx1": idx1, "idx2": idx2, "pt1": [smx, smy]}
+        try:
+            lines, _ = calculate_bridge(data_fake, lines, [], gap_half=gap_half, r=r_arc)
+        except Exception as ex:
+            print(f"[_apply_all] calculate_bridge failed: {ex}")
+    SESSION["interactive_lines"] = lines
+
+
+def _save_undo_snap():
+    SESSION["lines_history"].append({
+        "source_connectors":    json.loads(json.dumps(SESSION["source_connectors"])),
+        "propagated_connectors": json.loads(json.dumps(SESSION["propagated_connectors"])),
+    })
+
+
 @app.post("/bridge")
 async def bridge(data: dict):
-    lines = SESSION['interactive_lines']
-    connectors = SESSION['manual_connectors']
-    SESSION['lines_history'].append(json.loads(json.dumps(lines)))
-    # r = spacing / 2（offset 圓弧半徑）
-    spacing = float(SESSION.get('last_params', {}).get('spacing', 2.0))
-    r = max(spacing / 2, 0.1)
-    # gap_half = bridge_w / 2（使用者輸入）
-    bridge_w = float(data.get('bridge_w', 3.5))
+    _save_undo_snap()
+    spacing  = float(SESSION.get("last_params", {}).get("spacing", 2.0))
+    r_arc    = max(spacing / 2, 0.1)
+    bridge_w = float(data.get("bridge_w", 3.5))
     gap_half = max(bridge_w / 2, 0.1)
+    is_array = bool(data.get("is_array", False))   # ← NEW
     try:
-        new_lines, new_conn = calculate_bridge(data, lines, connectors, gap_half=gap_half, r=r)
-        SESSION['interactive_lines'] = new_lines
-        SESSION['manual_connectors'] = new_conn
-        return {"ok":True, "lines":new_lines, "connectors":[
-            {"id":c['id'],"lx":c['lx'],"ly":c['ly'],"rx":c['rx'],"ry":c['ry'],
-             "r":c['r'],"ang":c['ang']} for c in new_conn]}
+        lines = SESSION["interactive_lines"]
+        new_lines, new_src = calculate_bridge(data, lines, SESSION["source_connectors"],
+                                              gap_half=gap_half, r=r_arc)
+        # ── tag the newly added connector ──────────────────────────────────
+        if new_src:
+            new_src[-1]["_is_array"] = is_array        # ← NEW
+        SESSION["source_connectors"] = new_src
+        _apply_all_connectors_to_base()
+        _rebuild_manual_connectors()
+        new_id = new_src[-1]["id"] if new_src else None
+        return {"ok": True, "lines": SESSION["interactive_lines"],
+                "new_connector_id": new_id,
+                "connectors": _serialize_connectors(SESSION["manual_connectors"])}
     except Exception as e:
-        return JSONResponse({"ok":False,"error":str(e)}, status_code=400)
+        SESSION["lines_history"].pop()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
 
 @app.post("/delete_bridge")
 async def delete_bridge_single(data: dict):
-    """刪除單一 bridge，補回被切斷的原始線段。"""
-    connector_id = data.get('connector_id')
+    """Delete ONE connector (source or propagated) and restore its cut lines."""
+    connector_id = data.get("connector_id")
     if not connector_id:
         return JSONResponse({"ok": False, "error": "Missing connector_id"}, status_code=400)
-    lines = SESSION['interactive_lines']
-    connectors = SESSION['manual_connectors']
-    SESSION['lines_history'].append(json.loads(json.dumps(lines)))
+    _save_undo_snap()
+    src_conns  = SESSION["source_connectors"]
+    prop_conns = SESSION["propagated_connectors"]
+    is_source  = any(c.get("id") == connector_id for c in src_conns)
     try:
-        new_lines, new_conn = delete_bridge(connector_id, lines, connectors)
-        SESSION['interactive_lines'] = new_lines
-        SESSION['manual_connectors'] = new_conn
-        return {"ok": True, "lines": new_lines, "connectors": [
-            {"id": c.get('id',''), "lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
-             "r": c['r'], "ang": c['ang']} for c in new_conn]}
+        if is_source:
+            SESSION["source_connectors"] = [c for c in src_conns if c.get("id") != connector_id]
+        else:
+            SESSION["propagated_connectors"] = [c for c in prop_conns if c.get("id") != connector_id]
+        _apply_all_connectors_to_base()
+        _rebuild_manual_connectors()
+        return {"ok": True,
+                "lines": SESSION["interactive_lines"],
+                "connectors": _serialize_connectors(SESSION["manual_connectors"])}
     except Exception as e:
+        SESSION["lines_history"].pop()
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
 
 @app.post("/delete_bridge_array")
 async def delete_bridge_array_endpoint(data: dict):
-    """刪除某個 bridge 所有陣列 copies。"""
-    connector_id = data.get('connector_id')
+    """Delete a connector AND all its positional copies (source + propagated)."""
+    connector_id = data.get("connector_id")
     if not connector_id:
         return JSONResponse({"ok": False, "error": "Missing connector_id"}, status_code=400)
-    lines = SESSION['interactive_lines']
-    connectors = SESSION['manual_connectors']
-    fps = SESSION.get('final_polys_with_info', [])
-    mode = SESSION.get('last_params', {}).get('mode', '')
-
-    target = next((c for c in connectors if c.get('id') == connector_id), None)
+    src_conns  = SESSION["source_connectors"]
+    prop_conns = SESSION["propagated_connectors"]
+    fps        = SESSION.get("final_polys_with_info", [])
+    mode       = SESSION.get("last_params", {}).get("mode", "")
+    all_conns  = list(src_conns) + list(prop_conns)
+    target = next((c for c in all_conns if c.get("id") == connector_id), None)
     if target is None:
         return JSONResponse({"ok": False, "error": "Connector not found"}, status_code=400)
-
-    SESSION['lines_history'].append(json.loads(json.dumps(lines)))
-
+    _save_undo_snap()
     fp_list = [p for p, a, f, c in fps]
     tmx, tmy = _connector_midpoint(target)
-
     if "Nesting" in mode:
         pair_count = len(fp_list) // 2
-        src_pair = _find_owning_pair(target, fp_list)
-        ref_cx = (fp_list[src_pair*2].centroid.x + fp_list[src_pair*2+1].centroid.x) / 2
-        ref_cy = (fp_list[src_pair*2].centroid.y + fp_list[src_pair*2+1].centroid.y) / 2
-        local_x = tmx - ref_cx
-        local_y = tmy - ref_cy
+        src_pair   = _find_owning_pair(target, fp_list)
+        ref_cx     = (fp_list[src_pair*2].centroid.x + fp_list[src_pair*2+1].centroid.x) / 2
+        ref_cy     = (fp_list[src_pair*2].centroid.y + fp_list[src_pair*2+1].centroid.y) / 2
+        local_x, local_y = tmx - ref_cx, tmy - ref_cy
         ids_to_delete = set()
         for i in range(pair_count):
             pcx = (fp_list[i*2].centroid.x + fp_list[i*2+1].centroid.x) / 2
             pcy = (fp_list[i*2].centroid.y + fp_list[i*2+1].centroid.y) / 2
-            expected_x = pcx + local_x
-            expected_y = pcy + local_y
-            for c in connectors:
+            ex, ey = pcx + local_x, pcy + local_y
+            for c in all_conns:
                 cmx, cmy = _connector_midpoint(c)
-                if abs(cmx - expected_x) < 0.5 and abs(cmy - expected_y) < 0.5:
-                    ids_to_delete.add(c.get('id'))
+                if abs(cmx - ex) < 0.5 and abs(cmy - ey) < 0.5:
+                    ids_to_delete.add(c.get("id"))
     else:
         src_idx = _find_owning_poly(target, fp_list)
-        ref_cx = fp_list[src_idx].centroid.x
-        ref_cy = fp_list[src_idx].centroid.y
-        local_x = tmx - ref_cx
-        local_y = tmy - ref_cy
+        ref_cx, ref_cy = fp_list[src_idx].centroid.x, fp_list[src_idx].centroid.y
+        local_x, local_y = tmx - ref_cx, tmy - ref_cy
         ids_to_delete = set()
         for poly in fp_list:
-            expected_x = poly.centroid.x + local_x
-            expected_y = poly.centroid.y + local_y
-            for c in connectors:
+            ex, ey = poly.centroid.x + local_x, poly.centroid.y + local_y
+            for c in all_conns:
                 cmx, cmy = _connector_midpoint(c)
-                if abs(cmx - expected_x) < 0.5 and abs(cmy - expected_y) < 0.5:
-                    ids_to_delete.add(c.get('id'))
-
+                if abs(cmx - ex) < 0.5 and abs(cmy - ey) < 0.5:
+                    ids_to_delete.add(c.get("id"))
     try:
-        cur_lines = lines
-        cur_conns = connectors
-        for cid in ids_to_delete:
-            cur_lines, cur_conns = delete_bridge(cid, cur_lines, cur_conns)
-        SESSION['interactive_lines'] = cur_lines
-        SESSION['manual_connectors'] = cur_conns
-        return {"ok": True, "lines": cur_lines, "connectors": [
-            {"id": c.get('id',''), "lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
-             "r": c['r'], "ang": c['ang']} for c in cur_conns],
-            "deleted": len(ids_to_delete)}
+        SESSION["source_connectors"]     = [c for c in src_conns  if c.get("id") not in ids_to_delete]
+        SESSION["propagated_connectors"] = [c for c in prop_conns if c.get("id") not in ids_to_delete]
+        _apply_all_connectors_to_base()
+        _rebuild_manual_connectors()
+        return {"ok": True,
+                "lines": SESSION["interactive_lines"],
+                "connectors": _serialize_connectors(SESSION["manual_connectors"]),
+                "deleted": len(ids_to_delete)}
     except Exception as e:
         import traceback; traceback.print_exc()
+        SESSION["lines_history"].pop()
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.post("/undo")
 async def undo():
-    if SESSION['lines_history']:
-        SESSION['interactive_lines'] = SESSION['lines_history'].pop()
-    if SESSION['manual_connectors']:
-        SESSION['manual_connectors'].pop()
-    return {"ok":True, "lines":SESSION['interactive_lines'],
-            "connectors":[{"id":c.get('id',''),"lx":c['lx'],"ly":c['ly'],"rx":c['rx'],"ry":c['ry'],
-                            "r":c['r'],"ang":c['ang']}
-                           for c in SESSION['manual_connectors']]}
+    if SESSION["lines_history"]:
+        snap = SESSION["lines_history"].pop()
+        SESSION["source_connectors"]     = snap["source_connectors"]
+        SESSION["propagated_connectors"] = snap["propagated_connectors"]
+        _apply_all_connectors_to_base()
+        _rebuild_manual_connectors()
+    return {"ok": True,
+            "lines": SESSION["interactive_lines"],
+            "connectors": _serialize_connectors(SESSION["manual_connectors"])}
+
 
 @app.post("/reset_bridge")
 async def reset_bridge():
-    SESSION['interactive_lines'] = []
-    SESSION['manual_connectors'] = []
-    SESSION['lines_history'] = []
-    fps = SESSION.get('final_polys_with_info', [])
-    src_path = SESSION.get('_src_dxf_path')
-    cx_cy = SESSION.get('_orig_cx_cy', (0.0, 0.0))
-    compw = SESSION.get('compressed_w', 0)
-    comph = SESSION.get('compressed_h', 0)
-    r_corner = SESSION.get('stats', {}).get('corner_r', 4.0)
-    # FIX 2: reset 時也用 spacing
-    last_params = SESSION.get('last_params', {})
-    offset_dist = float(last_params.get('spacing', 2.0))
-    if offset_dist <= 0:
-        offset_dist = 0.5
-    if src_path and os.path.exists(src_path) and fps:
-        lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy, offset_dist)
-    else:
-        lines = []
-        for poly, ang, _, _ in fps:
-            ec = list(poly.exterior.coords)
-            for i in range(len(ec)-1):
-                lines.append({"id":str(uuid.uuid4()),
-                              "coords":[[ec[i][0],ec[i][1]],[ec[i+1][0],ec[i+1][1]]],
-                              "type":"body","kind":"line"})
-    if compw and comph:
-        panel_geo = create_rounded_panel(compw, comph, r_corner)
-        fc = list(panel_geo.exterior.coords)
-        for i in range(len(fc)-1):
-            lines.append({"id":str(uuid.uuid4()),
-                           "coords":[[round(fc[i][0],4),round(fc[i][1],4)],
-                                     [round(fc[i+1][0],4),round(fc[i+1][1],4)]],
-                           "type":"frame","kind":"line"})
-    SESSION['interactive_lines'] = lines
-    return {"ok":True, "lines":lines, "connectors":[]}
+    SESSION["source_connectors"]     = []
+    SESSION["propagated_connectors"] = []
+    SESSION["manual_connectors"]     = []
+    SESSION["lines_history"]         = []
+    base = json.loads(json.dumps(SESSION.get("base_lines", [])))
+    SESSION["interactive_lines"] = base
+    return {"ok": True, "lines": base, "connectors": []}
+
 
 @app.post("/propagate_bridge")
-async def propagate_bridge():
+async def propagate_bridge(request: Request):
     """
     Propagate bridges to all copies.
-    Uses orig_l1/orig_l2 from each source connector to precisely find the
-    corresponding lines in each copy (by translating the original line coords
-    by the poly centroid offset), then cuts exactly the right lines.
+    Body: { "connector_ids": ["id1", "id2", ...] }  -> propagate only those connectors
+    Body: {}  -> propagate ALL source_connectors
+    Each call fully replaces propagated copies for the targeted connectors.
     """
-    src_connectors = SESSION.get('manual_connectors', [])
-    fps            = SESSION.get('final_polys_with_info', [])
-    mode           = SESSION.get('last_params', {}).get('mode', '')
-    spacing        = float(SESSION.get('last_params', {}).get('spacing', 2.0))
-    r_arc          = max(spacing / 2, 0.1)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
 
-    if not src_connectors:
+    all_src = SESSION.get("source_connectors", [])
+    ids = body.get("connector_ids", None)   # list of ids, or None = all
+    if ids is not None:
+        id_set = set(ids)
+        # only propagate connectors that are flagged as array-type
+        to_propagate = [c for c in all_src
+                        if c.get("id") in id_set and c.get("_is_array", False)]
+    else:
+        # "propagate all" also only touches array-flagged connectors
+        to_propagate = [c for c in all_src if c.get("_is_array", False)]
+
+    fps     = SESSION.get("final_polys_with_info", [])
+    mode    = SESSION.get("last_params", {}).get("mode", "")
+    spacing = float(SESSION.get("last_params", {}).get("spacing", 2.0))
+    r_arc   = max(spacing / 2, 0.1)
+
+    if not to_propagate:
         return JSONResponse({"ok": False, "error": "No bridges to propagate"}, status_code=400)
     if not fps:
         return JSONResponse({"ok": False, "error": "No layout available"}, status_code=400)
@@ -1445,124 +1483,83 @@ async def propagate_bridge():
     try:
         fp_list = [p for p, a, f, c in fps]
 
-        # Build offset list per source connector
         if "Nesting" in mode:
             pair_count = len(fp_list) // 2
             pair_cx = [(fp_list[i*2].centroid.x + fp_list[i*2+1].centroid.x)/2 for i in range(pair_count)]
             pair_cy = [(fp_list[i*2].centroid.y + fp_list[i*2+1].centroid.y)/2 for i in range(pair_count)]
-            copies = pair_count
+            copies  = pair_count
             def get_offsets(c):
-                src = _find_owning_pair(c, fp_list)
-                return [(pair_cx[i]-pair_cx[src], pair_cy[i]-pair_cy[src]) for i in range(pair_count)]
+                s = _find_owning_pair(c, fp_list)
+                return [(pair_cx[i]-pair_cx[s], pair_cy[i]-pair_cy[s]) for i in range(pair_count)]
         else:
             copies = len(fp_list)
             def get_offsets(c):
-                src = _find_owning_poly(c, fp_list)
-                rcx, rcy = fp_list[src].centroid.x, fp_list[src].centroid.y
+                s = _find_owning_poly(c, fp_list)
+                rcx, rcy = fp_list[s].centroid.x, fp_list[s].centroid.y
                 return [(p.centroid.x-rcx, p.centroid.y-rcy) for p in fp_list]
 
-        cur_lines = list(SESSION['interactive_lines'])
-        all_connectors = []
+        # Keep propagated copies from OTHER source connectors; replace only those
+        # belonging to the connectors we are propagating now.
+        propagating_ids = {c["id"] for c in to_propagate}
+        kept_prop = [c for c in SESSION["propagated_connectors"]
+                     if c.get("_src_id") not in propagating_ids]
+        new_propagated = list(kept_prop)
 
-        def line_coords_match(l, target_coords, tol=0.5):
-            """Check if a line's coords match target coords within tolerance."""
-            if l.get('kind') == 'arc': return False
-            lc = l.get('coords', [])
-            if len(lc) < 2: return False
-            tc = target_coords
-            # Check both endpoint orderings
-            d0 = math.sqrt((lc[0][0]-tc[0][0])**2+(lc[0][1]-tc[0][1])**2)
-            d1 = math.sqrt((lc[1][0]-tc[1][0])**2+(lc[1][1]-tc[1][1])**2)
-            d0r = math.sqrt((lc[0][0]-tc[1][0])**2+(lc[0][1]-tc[1][1])**2)
-            d1r = math.sqrt((lc[1][0]-tc[0][0])**2+(lc[1][1]-tc[0][1])**2)
-            return (d0 < tol and d1 < tol) or (d0r < tol and d1r < tol)
-
-        for src_c in src_connectors:
-            gap_half = math.sqrt((src_c['rx']-src_c['lx'])**2 + (src_c['ry']-src_c['ly'])**2) / 2
-            orig_l1 = src_c.get('orig_l1')
-            orig_l2 = src_c.get('orig_l2')
-            smx = (src_c['lx'] + src_c['rx']) / 2
-            smy = (src_c['ly'] + src_c['ry']) / 2
+        for src_c in to_propagate:
+            orig_l1 = src_c.get("orig_l1")
+            orig_l2 = src_c.get("orig_l2")
 
             for dx, dy in get_offsets(src_c):
-                # 跳過 source 自己（dx≈0, dy≈0），直接保留原 connector
                 if abs(dx) < 0.01 and abs(dy) < 0.01:
-                    all_connectors.append(src_c)
-                    continue
-                # Build expected coords for orig_l1 and orig_l2 at this copy
-                if orig_l1 and orig_l1.get('coords'):
-                    expected_l1_coords = [
-                        [orig_l1['coords'][0][0]+dx, orig_l1['coords'][0][1]+dy],
-                        [orig_l1['coords'][1][0]+dx, orig_l1['coords'][1][1]+dy],
+                    continue  # skip source copy itself
+
+                if orig_l1 and orig_l1.get("coords"):
+                    exp_l1_coords = [
+                        [orig_l1["coords"][0][0]+dx, orig_l1["coords"][0][1]+dy],
+                        [orig_l1["coords"][1][0]+dx, orig_l1["coords"][1][1]+dy],
                     ]
+                    exp_l1 = {"coords": exp_l1_coords, "kind": "line",
+                               "type": orig_l1.get("type", "offset"), "id": str(uuid.uuid4())}
                 else:
-                    expected_l1_coords = None
+                    exp_l1 = None
 
-                if orig_l2 and orig_l2.get('coords'):
-                    expected_l2_coords = [
-                        [orig_l2['coords'][0][0]+dx, orig_l2['coords'][0][1]+dy],
-                        [orig_l2['coords'][1][0]+dx, orig_l2['coords'][1][1]+dy],
+                if orig_l2 and orig_l2.get("coords"):
+                    exp_l2_coords = [
+                        [orig_l2["coords"][0][0]+dx, orig_l2["coords"][0][1]+dy],
+                        [orig_l2["coords"][1][0]+dx, orig_l2["coords"][1][1]+dy],
                     ]
+                    exp_l2 = {"coords": exp_l2_coords, "kind": "line",
+                               "type": orig_l2.get("type", "offset"), "id": str(uuid.uuid4())}
                 else:
-                    expected_l2_coords = None
+                    exp_l2 = None
 
-                # Find matching lines in cur_lines
-                idx1 = idx2 = None
-                if expected_l1_coords:
-                    for i, l in enumerate(cur_lines):
-                        if line_coords_match(l, expected_l1_coords):
-                            idx1 = i; break
-                if expected_l2_coords:
-                    for i, l in enumerate(cur_lines):
-                        if i != idx1 and line_coords_match(l, expected_l2_coords):
-                            idx2 = i; break
+                new_propagated.append({
+                    "type":  "precise_sandglass_arc",
+                    "lx": src_c["lx"]+dx, "ly": src_c["ly"]+dy,
+                    "rx": src_c["rx"]+dx, "ry": src_c["ry"]+dy,
+                    "r": r_arc, "ang": src_c["ang"],
+                    "id": str(uuid.uuid4()),
+                    "_src_id": src_c["id"],
+                    "orig_l1": exp_l1,
+                    "orig_l2": exp_l2,
+                    "cut_ids": [],
+                })
 
-                if idx1 is not None and idx2 is not None:
-                    pt1 = [smx + dx, smy + dy]
-                    data_fake = {'idx1': idx1, 'idx2': idx2, 'pt1': pt1}
-                    try:
-                        cur_lines, new_conns = calculate_bridge(
-                            data_fake, cur_lines, all_connectors,
-                            gap_half=gap_half, r=r_arc)
-                        all_connectors = new_conns
-                    except Exception as ex:
-                        print(f"[propagate] calculate_bridge failed: {ex}")
-                        all_connectors.append({
-                            'type': 'precise_sandglass_arc',
-                            'lx': src_c['lx']+dx, 'ly': src_c['ly']+dy,
-                            'rx': src_c['rx']+dx, 'ry': src_c['ry']+dy,
-                            'r': r_arc, 'ang': src_c['ang'],
-                            'id': str(uuid.uuid4()),
-                            'cut_ids': [], 'orig_l1': None, 'orig_l2': None,
-                        })
-                else:
-                    # Fallback: just shift the connector geometry
-                    all_connectors.append({
-                        'type': 'precise_sandglass_arc',
-                        'lx': src_c['lx']+dx, 'ly': src_c['ly']+dy,
-                        'rx': src_c['rx']+dx, 'ry': src_c['ry']+dy,
-                        'r': r_arc, 'ang': src_c['ang'],
-                        'id': str(uuid.uuid4()),
-                        'cut_ids': [], 'orig_l1': None, 'orig_l2': None,
-                    })
+        SESSION["propagated_connectors"] = new_propagated
+        _apply_all_connectors_to_base()
+        _rebuild_manual_connectors()
 
-        SESSION['manual_connectors'] = all_connectors
-        SESSION['interactive_lines'] = cur_lines
-
-        serialized = [
-            {"id": c.get('id',''), "lx": c['lx'], "ly": c['ly'], "rx": c['rx'], "ry": c['ry'],
-             "r": c['r'], "ang": c['ang']}
-            for c in all_connectors
-        ]
         return {
             "ok": True,
-            "lines": cur_lines,
-            "connectors": serialized,
-            "copies": copies,
+            "lines":      SESSION["interactive_lines"],
+            "connectors": _serialize_connectors(SESSION["manual_connectors"]),
+            "copies":     copies,
         }
     except Exception as e:
         import traceback; traceback.print_exc()
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 
 @app.post("/adjust")
 async def adjust(data: dict):
@@ -1659,11 +1656,14 @@ async def adjust(data: dict):
         SESSION['stats']          = stats
         SESSION['compressed_w']   = compw
         SESSION['compressed_h']   = comph
-        SESSION['interactive_lines']  = []
-        SESSION['manual_connectors']  = []
-        SESSION['lines_history']      = []
+        # Reset all bridge state on layout change
+        SESSION['base_lines'] = []
+        SESSION['interactive_lines'] = []
+        SESSION['source_connectors'] = []
+        SESSION['propagated_connectors'] = []
+        SESSION['manual_connectors'] = []
+        SESSION['lines_history'] = []
 
-        # FIX 2: adjust 時也用 spacing
         offset_dist = float(new_params.get('spacing', 2.0))
         if offset_dist <= 0:
             offset_dist = 0.5
@@ -1681,6 +1681,8 @@ async def adjust(data: dict):
                            "coords":[[round(fc[i][0],4),round(fc[i][1],4)],
                                      [round(fc[i+1][0],4),round(fc[i+1][1],4)]],
                            "type":"frame","kind":"line"})
+
+        SESSION['base_lines'] = json.loads(json.dumps(lines))
         SESSION['interactive_lines'] = lines
 
         stats['elapsed'] = 0
@@ -1716,8 +1718,6 @@ async def download_bridge_dxf():
     for lname, col in [('PARTS',7),('OFFSETS',4),('BRIDGES',2),('FRAME',7)]:
         doc.layers.new(lname, dxfattribs={'color': col})
 
-    # PARTS：直接從 fps 的 poly 幾何畫線，不用 blockref
-    # PARTS：lwpolyline，檔案小
     for poly, ang, _, _ in fps:
         ec = list(poly.exterior.coords)
         msp.add_lwpolyline(ec, dxfattribs={'layer': 'PARTS', 'closed': True})
@@ -1725,14 +1725,12 @@ async def download_bridge_dxf():
             hc = list(hole.coords)
             msp.add_lwpolyline(hc, dxfattribs={'layer': 'PARTS', 'closed': True})
 
-    # OFFSETS：從 interactive_lines 讀，保留打斷
     for ld in SESSION.get('interactive_lines', []):
         if ld.get('type') == 'offset':
             coords = ld.get('coords', [])
             if len(coords) == 2:
                 msp.add_line(coords[0], coords[1], dxfattribs={'layer': 'OFFSETS'})
 
-    # BRIDGES（不變）
     for b in SESSION.get('manual_connectors', []):
         if b.get('type') == 'precise_sandglass_arc':
             t = b['ang']
@@ -1743,7 +1741,6 @@ async def download_bridge_dxf():
                         start_angle=t+90, end_angle=t+270,
                         dxfattribs={'layer': 'BRIDGES'})
 
-    # FRAME（不變）
     centers = [(R_corner, R_corner), (compw-R_corner, R_corner),
                (compw-R_corner, comph-R_corner), (R_corner, comph-R_corner)]
     msp.add_line((R_corner, 0),      (compw-R_corner, 0),      dxfattribs={'layer': 'FRAME'})
