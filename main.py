@@ -275,7 +275,6 @@ def refine_position(poly_a, poly_b, init_dx, init_dy, target_dist):
             no_improve_count = 0
     return best_dx, best_dy, best_b, best_area
 
-# ── 形狀感知壓縮：排版後推擠每對相鄰形狀 ──────────────────────────────────────
 def compact_layout(fps, spacing, mode="Matrix"):
     if len(fps) < 2:
         return fps
@@ -284,86 +283,181 @@ def compact_layout(fps, spacing, mode="Matrix"):
     angs  = [a for p, a, f, c in fps]
     flags = [f for p, a, f, c in fps]
 
-    TOL = 0.01  # mm 精度
-
-    def push_x(pa, pb):
-        if pb.bounds[0] < pa.bounds[2] - 0.1:
-            return pb
-        cur_dist = pa.distance(pb)
-        if cur_dist <= spacing + TOL:
-            return pb
-        lo, hi = 0.0, cur_dist - spacing
-        for _ in range(20):
-            mid = (lo + hi) / 2
-            pb_test = translate(pb, -mid, 0)
-            d = pa.distance(pb_test)
-            if d < spacing:
-                hi = mid
-            else:
-                lo = mid
-        shift = lo
-        return translate(pb, -shift, 0)
-
-    def push_y(pa, pb):
-        if pb.bounds[1] < pa.bounds[3] - 0.1:
-            return pb
-        cur_dist = pa.distance(pb)
-        if cur_dist <= spacing + TOL:
-            return pb
-        lo, hi = 0.0, cur_dist - spacing
-        for _ in range(20):
-            mid = (lo + hi) / 2
-            pb_test = translate(pb, 0, -mid)
-            d = pa.distance(pb_test)
-            if d < spacing:
-                hi = mid
-            else:
-                lo = mid
-        shift = lo
-        return translate(pb, 0, -shift)
+    TOL = 0.01
 
     if "Nesting" in mode:
         pair_count = len(polys) // 2
-        units = []
-        for i in range(pair_count):
-            pa, pb = polys[i*2], polys[i*2+1]
-            units.append(unary_union([pa, pb]))
+        units = [unary_union([polys[i*2], polys[i*2+1]]) for i in range(pair_count)]
 
-        unit_bounds = [u.bounds for u in units]
-        sorted_units = sorted(range(len(units)), key=lambda i: (round(units[i].centroid.y, 0), round(units[i].centroid.x, 0)))
-        rows = _group_by_coord([units[i].centroid.y for i in sorted_units], tol=30)
+        # 由左下到右上排序（跟原本一致）
+        sorted_idxs = sorted(range(pair_count),
+                             key=lambda i: (round(units[i].centroid.y, 1),
+                                            round(units[i].centroid.x, 1)))
 
-        new_unit_positions = [None] * len(units)
-        for row_idxs in rows:
-            orig_idxs = [sorted_units[i] for i in row_idxs]
-            orig_idxs_sorted = sorted(orig_idxs, key=lambda i: units[i].centroid.x)
-            cur_units = [units[i] for i in orig_idxs_sorted]
-            for j in range(1, len(cur_units)):
-                cur_units[j] = _push_shape_x(cur_units[j-1], cur_units[j], spacing, TOL)
-            for j, idx in enumerate(orig_idxs_sorted):
-                new_unit_positions[idx] = cur_units[j]
+        # 建立 row/col 索引，方便查找斜向鄰居
+        # sorted_idxs 的順序就是 row-major（先 y 再 x）
+        # 先把 pair 分 row
+        rows_of_pairs = []
+        cur_row = [sorted_idxs[0]]
+        for k in range(1, len(sorted_idxs)):
+            prev = sorted_idxs[k-1]
+            curr = sorted_idxs[k]
+            if abs(units[curr].centroid.y - units[prev].centroid.y) < \
+               (units[0].bounds[3] - units[0].bounds[1]) * 0.5:
+                cur_row.append(curr)
+            else:
+                rows_of_pairs.append(cur_row)
+                cur_row = [curr]
+        rows_of_pairs.append(cur_row)
 
-        sorted_by_x = sorted(range(len(units)), key=lambda i: (round(units[i].centroid.x, 0), round(units[i].centroid.y, 0)))
-        cols = _group_by_coord([units[sorted_by_x[i]].centroid.x for i in range(len(units))], tol=30)
-        for col_idxs in cols:
-            orig_idxs = [sorted_by_x[i] for i in col_idxs]
-            orig_idxs_sorted = sorted(orig_idxs, key=lambda i: new_unit_positions[i].centroid.y)
-            cur_units = [new_unit_positions[i] for i in orig_idxs_sorted]
-            for j in range(1, len(cur_units)):
-                cur_units[j] = _push_shape_y(cur_units[j-1], cur_units[j], spacing, TOL)
-            for j, idx in enumerate(orig_idxs_sorted):
-                new_unit_positions[idx] = cur_units[j]
+        # 每個 pair idx 對應到 (row_i, col_i)
+        pair_pos = {}  # idx -> (row_i, col_i)
+        for ri, row in enumerate(rows_of_pairs):
+            row_sorted = sorted(row, key=lambda i: units[i].centroid.x)
+            for ci, idx in enumerate(row_sorted):
+                pair_pos[idx] = (ri, ci)
 
+        # 建立 (row_i, col_i) -> idx 反查表
+        pos_to_idx = {v: k for k, v in pair_pos.items()}
+
+        new_units = [None] * pair_count
+
+        # 按 row-major 順序處理（row 由小到大，同 row 由左到右）
+        process_order = []
+        for ri, row in enumerate(rows_of_pairs):
+            row_sorted = sorted(row, key=lambda i: units[i].centroid.x)
+            process_order.extend(row_sorted)
+
+        for idx in process_order:
+            u = units[idx]
+            ri, ci = pair_pos[idx]
+
+            # 收集需要檢查的鄰居（已放置的）
+            # 左鄰 (ri, ci-1)、下鄰 (ri-1, ci)、左下鄰 (ri-1, ci-1)、右下鄰 (ri-1, ci+1)
+            neighbor_keys = [
+                (ri,   ci-1),   # 左
+                (ri-1, ci),     # 下
+                (ri-1, ci-1),   # 左下
+                (ri+1, ci-1),   # 左上  ← 修正這裡（原本是右下 ri-1, ci+1）
+                (ri-1, ci+1),   # 右下（Y 約束用，右下鄰已放置）
+            ]
+            neighbors = []
+            for nk in neighbor_keys:
+                nidx = pos_to_idx.get(nk)
+                if nidx is not None and new_units[nidx] is not None:
+                    neighbors.append(new_units[nidx])
+
+            if not neighbors:
+                new_units[idx] = u
+                continue
+
+            # ── X 方向推擠（往左），只看左側鄰居 ──────────────────────────
+            left_neighbors = [n for n in neighbors
+                               if n.centroid.x < u.centroid.x + 0.1]
+            if left_neighbors:
+                max_possible = 0.0
+                for n in left_neighbors:
+                    d = n.distance(u)
+                    if d > spacing + TOL:
+                        max_possible = max(max_possible, d - spacing)
+                if max_possible > TOL:
+                    # 二分搜尋：左移量讓所有 neighbors（含斜向）都保持 >= spacing
+                    lo, hi = 0.0, max_possible
+                    for _ in range(24):
+                        mid = (lo + hi) / 2
+                        test = translate(u, -mid, 0)
+                        if all(n.distance(test) >= spacing - TOL for n in neighbors):
+                            lo = mid
+                        else:
+                            hi = mid
+                    if lo > TOL:
+                        u = translate(u, -lo, 0)
+
+            # ── Y 方向推擠 ──────────────────────────────────────────────
+            direct_below = new_units[pos_to_idx[(ri-1, ci)]] \
+                if pos_to_idx.get((ri-1, ci)) is not None \
+                and new_units[pos_to_idx[(ri-1, ci)]] is not None else None
+
+            if direct_below is not None:
+                d = direct_below.distance(u)
+                if d > spacing + TOL:
+                    max_possible = d - spacing
+                    # 約束：下鄰 + 左下鄰 + 右下鄰 都要 >= spacing
+                    lo, hi = 0.0, max_possible
+                    for _ in range(24):
+                        mid = (lo + hi) / 2
+                        test = translate(u, 0, -mid)
+                        if all(n.distance(test) >= spacing - TOL for n in neighbors):
+                            lo = mid
+                        else:
+                            hi = mid
+                    if lo > TOL:
+                        u = translate(u, 0, -lo)
+
+            new_units[idx] = u
+        # ── 第二輪：純 Y 補推，讓每欄上下緊密度一致 ──────────────────
+        for ri, row in enumerate(rows_of_pairs):
+            row_sorted = sorted(row, key=lambda i: units[i].centroid.x)
+            for idx in row_sorted:
+                ri2, ci2 = pair_pos[idx]
+                if ri2 == 0:
+                    continue  # 最底排不用推
+
+                # 收集下方三個鄰居
+                y_neighbor_keys = [
+                    (ri2-1, ci2),    # 正下
+                    (ri2-1, ci2-1),  # 左下
+                    (ri2-1, ci2+1),  # 右下
+                ]
+                y_neighbors = []
+                for nk in y_neighbor_keys:
+                    nidx = pos_to_idx.get(nk)
+                    if nidx is not None and new_units[nidx] is not None:
+                        y_neighbors.append(new_units[nidx])
+
+                if not y_neighbors:
+                    continue
+
+                u = new_units[idx]
+                max_possible = 0.0
+                for n in y_neighbors:
+                    d = n.distance(u)
+                    if d > spacing + TOL:
+                        max_possible = max(max_possible, d - spacing)
+
+                if max_possible <= TOL:
+                    continue
+
+                lo, hi = 0.0, max_possible
+                for _ in range(24):
+                    mid = (lo + hi) / 2
+                    test = translate(u, 0, -mid)
+                    if all(n.distance(test) >= spacing - TOL for n in y_neighbors):
+                        lo = mid
+                    else:
+                        hi = mid
+                if lo > TOL:
+                    new_units[idx] = translate(u, 0, -lo)
+                    # 同步更新 pair 內兩個 poly
+                    i = idx
+                    orig_unit = unary_union([polys[i*2], polys[i*2+1]])
+                    dx = new_units[i].centroid.x - orig_unit.centroid.x
+                    dy = new_units[i].centroid.y - orig_unit.centroid.y
+                    polys[i*2]   = translate(polys[i*2],   dx, dy)
+                    polys[i*2+1] = translate(polys[i*2+1], dx, dy)
+
+        # pair 內兩個 poly 依 unit 偏移量平移
         new_polys = list(polys)
         for i in range(pair_count):
             orig_unit = unary_union([polys[i*2], polys[i*2+1]])
-            new_unit  = new_unit_positions[i]
+            new_unit  = new_units[i]
             dx = new_unit.centroid.x - orig_unit.centroid.x
             dy = new_unit.centroid.y - orig_unit.centroid.y
             new_polys[i*2]   = translate(polys[i*2],   dx, dy)
             new_polys[i*2+1] = translate(polys[i*2+1], dx, dy)
 
     else:
+        # Matrix / V-Cut（完全不動）
         new_polys = list(polys)
 
         heights = [p.bounds[3] - p.bounds[1] for p in polys]
@@ -388,10 +482,8 @@ def compact_layout(fps, spacing, mode="Matrix"):
         for row in rows:
             row_sorted = sorted(row, key=lambda i: new_polys[i].centroid.x)
             for k in range(1, len(row_sorted)):
-                prev_idx = row_sorted[k-1]
-                curr_idx = row_sorted[k]
-                new_polys[curr_idx] = _push_shape_x(
-                    new_polys[prev_idx], new_polys[curr_idx], spacing, TOL)
+                new_polys[row_sorted[k]] = _push_shape_x(
+                    new_polys[row_sorted[k-1]], new_polys[row_sorted[k]], spacing, TOL)
 
         by_x = sorted(range(len(polys)), key=lambda i: new_polys[i].centroid.x)
         cols = []
@@ -408,17 +500,14 @@ def compact_layout(fps, spacing, mode="Matrix"):
         for col in cols:
             col_sorted = sorted(col, key=lambda i: new_polys[i].centroid.y)
             for k in range(1, len(col_sorted)):
-                prev_idx = col_sorted[k-1]
-                curr_idx = col_sorted[k]
-                new_polys[curr_idx] = _push_shape_y(
-                    new_polys[prev_idx], new_polys[curr_idx], spacing, TOL)
+                new_polys[col_sorted[k]] = _push_shape_y(
+                    new_polys[col_sorted[k-1]], new_polys[col_sorted[k]], spacing, TOL)
 
     new_fps = []
     for i, (p, a, f, c) in enumerate(fps):
         np_ = new_polys[i]
         new_fps.append((np_, a, f, (np_.centroid.x, np_.centroid.y)))
     return new_fps
-
 
 def _group_by_coord(coords, tol=30):
     if not coords:
@@ -638,7 +727,7 @@ def run_nesting(raw_poly, params, progress_cb=None):
         return result_a
 
 
-def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0):
+def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, raw_poly, offset_dist=2.0):
     import math as _math
 
     lines = []
@@ -675,7 +764,9 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0)
             bx, by = dxf_x - ocx, dxf_y - ocy
             rx = bx * cos_a - by * sin_a
             ry = bx * sin_a + by * cos_a
-            return rx + pcx, ry + pcy
+            rb_raw = rotate(raw_poly, ang_deg, origin=(0,0)).bounds
+            pb = poly.bounds
+            return rx + (pb[0] - rb_raw[0]), ry + (pb[1] - rb_raw[1])
 
         exterior_arcs = []
         for arc in dxf_arcs:
@@ -693,11 +784,13 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, offset_dist=2.0)
             ring_poly = Polygon(hole)
             rcx, rcy = ring_poly.centroid.x, ring_poly.centroid.y
             import math as _m2
-            r_est = _m2.sqrt(ring_poly.area / _m2.pi)
-            best_idx, best_dist = -1, 1.0
+            hb = ring_poly.bounds
+            r_est = ((hb[2]-hb[0]) + (hb[3]-hb[1])) / 4
+            best_idx, best_dist = -1, 3.0
             for idx, ea in enumerate(exterior_arcs):
                 d = _m2.sqrt((ea["ncx"]-rcx)**2 + (ea["ncy"]-rcy)**2)
-                if d < best_dist and abs(ea["r"] - r_est) < r_est * 0.1 + 0.5:
+                r_ratio = abs(ea["r"] - r_est) / max(r_est, 0.1)
+                if d < best_dist and r_ratio < 0.15:
                     best_dist = d
                     best_idx = idx
             if best_idx >= 0:
@@ -1137,7 +1230,7 @@ async def nest(params: dict):
             src_path = SESSION.get('_src_dxf_path')
             cx_cy = SESSION.get('_orig_cx_cy', (0.0, 0.0))
             if src_path and os.path.exists(src_path):
-                lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy, offset_dist)
+                lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy, raw, offset_dist)
             else:
                 lines = []
                 for poly, ang, _, _ in fps:
@@ -1670,7 +1763,7 @@ async def adjust(data: dict):
 
         cx_cy = SESSION.get('_orig_cx_cy', (0.0, 0.0))
         if src_path and os.path.exists(src_path):
-            lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy, offset_dist)
+            lines = build_interactive_lines_from_dxf(src_path, fps, cx_cy, raw, offset_dist)
         else:
             lines = []
 
