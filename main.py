@@ -146,29 +146,21 @@ async def sheet_calculate(request: Request):
         return JSONResponse({"error": str(e), "detail": tb}, status_code=500)
 
 # ── In-memory session ──────────────────────────────────────────────────────────
-# FIX: Split manual_connectors into source_connectors + propagated_connectors
-# source_connectors  = bridges placed directly by the user (single or first of ×All)
-# propagated_connectors = copies created by propagate; rebuilt from scratch each time
-# manual_connectors  = source + propagated (what the canvas and DXF export see)
-# base_lines         = the clean line state BEFORE any bridge was cut
-#                      (rebuilt whenever source_connectors changes)
 SESSION = {
     "raw_poly": None, "geo_block_name": None, "doc_out": None,
     "best_layout": [], "best_step_w": 0, "best_step_h": 0,
     "best_count_col": 0, "best_count_row": 0,
     "final_polys_with_info": [], "stats": {},
-    # NEW bridge state management
-    "base_lines": [],            # lines with NO bridges cut (reset-to-clean state)
-    "interactive_lines": [],     # lines with source bridge cuts applied
-    "source_connectors": [],     # hand-placed bridges only
-    "propagated_connectors": [], # copies from last propagate
-    "manual_connectors": [],     # source + propagated (combined view)
-    "lines_history": [],         # undo stack (snapshots of interactive_lines + source_connectors)
+    "base_lines": [],
+    "interactive_lines": [],
+    "source_connectors": [],
+    "propagated_connectors": [],
+    "manual_connectors": [],
+    "lines_history": [],
 }
 
 
 def _rebuild_manual_connectors():
-    """Keep manual_connectors = source + propagated."""
     SESSION["manual_connectors"] = (
         list(SESSION["source_connectors"]) +
         list(SESSION["propagated_connectors"])
@@ -218,11 +210,11 @@ def get_full_polygon_with_holes(file_path, target_doc=None):
                     pts_xy.append(pts_xy[0])
                     poly = Polygon(pts_xy)
                 else:
-                    pts = list(make_path(entity).flattening(distance=0.05))
+                    pts = list(make_path(entity).flattening(distance=0.005))
                     if len(pts) < 3: continue
                     poly = Polygon([(p.x, p.y) for p in pts])
             else:
-                pts = list(make_path(entity).flattening(distance=0.05))
+                pts = list(make_path(entity).flattening(distance=0.005))
                 if len(pts) < 3: continue
                 poly = Polygon([(p.x, p.y) for p in pts])
             if not poly.is_valid: poly = poly.buffer(0)
@@ -283,231 +275,464 @@ def compact_layout(fps, spacing, mode="Matrix"):
     angs  = [a for p, a, f, c in fps]
     flags = [f for p, a, f, c in fps]
 
-    TOL = 0.01
+    TOL = 0.005
+
+    def _make_fps(new_polys):
+        return [(new_polys[i], angs[i], flags[i],
+                 (new_polys[i].centroid.x, new_polys[i].centroid.y))
+                for i in range(len(new_polys))]
 
     if "Nesting" in mode:
         pair_count = len(polys) // 2
         units = [unary_union([polys[i*2], polys[i*2+1]]) for i in range(pair_count)]
 
-        # 由左下到右上排序（跟原本一致）
+        row_tol = (units[0].bounds[3] - units[0].bounds[1]) * 0.5
+
         sorted_idxs = sorted(range(pair_count),
                              key=lambda i: (round(units[i].centroid.y, 1),
                                             round(units[i].centroid.x, 1)))
 
-        # 建立 row/col 索引，方便查找斜向鄰居
-        # sorted_idxs 的順序就是 row-major（先 y 再 x）
-        # 先把 pair 分 row
         rows_of_pairs = []
         cur_row = [sorted_idxs[0]]
         for k in range(1, len(sorted_idxs)):
             prev = sorted_idxs[k-1]
             curr = sorted_idxs[k]
-            if abs(units[curr].centroid.y - units[prev].centroid.y) < \
-               (units[0].bounds[3] - units[0].bounds[1]) * 0.5:
+            if abs(units[curr].centroid.y - units[prev].centroid.y) < row_tol:
                 cur_row.append(curr)
             else:
                 rows_of_pairs.append(cur_row)
                 cur_row = [curr]
         rows_of_pairs.append(cur_row)
 
-        # 每個 pair idx 對應到 (row_i, col_i)
-        pair_pos = {}  # idx -> (row_i, col_i)
+        pair_pos = {}
         for ri, row in enumerate(rows_of_pairs):
             row_sorted = sorted(row, key=lambda i: units[i].centroid.x)
             for ci, idx in enumerate(row_sorted):
                 pair_pos[idx] = (ri, ci)
-
-        # 建立 (row_i, col_i) -> idx 反查表
         pos_to_idx = {v: k for k, v in pair_pos.items()}
 
-        new_units = [None] * pair_count
+        num_cols = max(ci for _, ci in pair_pos.values()) + 1
+        num_rows = len(rows_of_pairs)
 
-        # 按 row-major 順序處理（row 由小到大，同 row 由左到右）
-        process_order = []
-        for ri, row in enumerate(rows_of_pairs):
-            row_sorted = sorted(row, key=lambda i: units[i].centroid.x)
-            process_order.extend(row_sorted)
+        # 初始化 new_units：直接從 units 複製
+        new_units = list(units)
 
-        for idx in process_order:
-            u = units[idx]
-            ri, ci = pair_pos[idx]
+        def left_col_nbrs(ci, ri):
+            result = []
+            for dr in [-1, 0, 1]:
+                nidx = pos_to_idx.get((ri + dr, ci - 1))
+                if nidx is not None:
+                    result.append(new_units[nidx])
+            return result
 
-            # 收集需要檢查的鄰居（已放置的）
-            # 左鄰 (ri, ci-1)、下鄰 (ri-1, ci)、左下鄰 (ri-1, ci-1)、右下鄰 (ri-1, ci+1)
-            neighbor_keys = [
-                (ri,   ci-1),   # 左
-                (ri-1, ci),     # 下
-                (ri-1, ci-1),   # 左下
-                (ri+1, ci-1),   # 左上  ← 修正這裡（原本是右下 ri-1, ci+1）
-                (ri-1, ci+1),   # 右下（Y 約束用，右下鄰已放置）
-            ]
-            neighbors = []
-            for nk in neighbor_keys:
-                nidx = pos_to_idx.get(nk)
-                if nidx is not None and new_units[nidx] is not None:
-                    neighbors.append(new_units[nidx])
+        def below_row_nbrs(ci, ri):
+            result = []
+            for dc in [-1, 0, 1]:
+                nidx = pos_to_idx.get((ri - 1, ci + dc))
+                if nidx is not None:
+                    result.append(new_units[nidx])
+            return result
 
-            if not neighbors:
-                new_units[idx] = u
-                continue
+        def col_idxs_n(ci):
+            return [idx for idx, (_, c) in pair_pos.items() if c == ci]
 
-            # ── X 方向推擠（往左），只看左側鄰居 ──────────────────────────
-            left_neighbors = [n for n in neighbors
-                               if n.centroid.x < u.centroid.x + 0.1]
-            if left_neighbors:
-                max_possible = 0.0
-                for n in left_neighbors:
-                    d = n.distance(u)
-                    if d > spacing + TOL:
-                        max_possible = max(max_possible, d - spacing)
-                if max_possible > TOL:
-                    # 二分搜尋：左移量讓所有 neighbors（含斜向）都保持 >= spacing
-                    lo, hi = 0.0, max_possible
-                    for _ in range(24):
-                        mid = (lo + hi) / 2
-                        test = translate(u, -mid, 0)
-                        if all(n.distance(test) >= spacing - TOL for n in neighbors):
-                            lo = mid
-                        else:
-                            hi = mid
-                    if lo > TOL:
-                        u = translate(u, -lo, 0)
-
-            # ── Y 方向推擠 ──────────────────────────────────────────────
-            direct_below = new_units[pos_to_idx[(ri-1, ci)]] \
-                if pos_to_idx.get((ri-1, ci)) is not None \
-                and new_units[pos_to_idx[(ri-1, ci)]] is not None else None
-
-            if direct_below is not None:
-                d = direct_below.distance(u)
-                if d > spacing + TOL:
-                    max_possible = d - spacing
-                    # 約束：下鄰 + 左下鄰 + 右下鄰 都要 >= spacing
-                    lo, hi = 0.0, max_possible
-                    for _ in range(24):
-                        mid = (lo + hi) / 2
-                        test = translate(u, 0, -mid)
-                        if all(n.distance(test) >= spacing - TOL for n in neighbors):
-                            lo = mid
-                        else:
-                            hi = mid
-                    if lo > TOL:
-                        u = translate(u, 0, -lo)
-
-            new_units[idx] = u
-        # ── 第二輪：純 Y 補推，讓每欄上下緊密度一致 ──────────────────
-        for ri, row in enumerate(rows_of_pairs):
-            row_sorted = sorted(row, key=lambda i: units[i].centroid.x)
-            for idx in row_sorted:
-                ri2, ci2 = pair_pos[idx]
-                if ri2 == 0:
-                    continue  # 最底排不用推
-
-                # 收集下方三個鄰居
-                y_neighbor_keys = [
-                    (ri2-1, ci2),    # 正下
-                    (ri2-1, ci2-1),  # 左下
-                    (ri2-1, ci2+1),  # 右下
-                ]
-                y_neighbors = []
-                for nk in y_neighbor_keys:
-                    nidx = pos_to_idx.get(nk)
-                    if nidx is not None and new_units[nidx] is not None:
-                        y_neighbors.append(new_units[nidx])
-
-                if not y_neighbors:
-                    continue
-
+        # ── 第一階段：逐欄推 X（整欄統一平移）────────────────────────────────
+        for ci in range(1, num_cols):
+            idxs = col_idxs_n(ci)
+            max_shifts = []
+            for idx in idxs:
+                ri, _ = pair_pos[idx]
                 u = new_units[idx]
-                max_possible = 0.0
-                for n in y_neighbors:
-                    d = n.distance(u)
-                    if d > spacing + TOL:
-                        max_possible = max(max_possible, d - spacing)
-
-                if max_possible <= TOL:
+                nbrs = left_col_nbrs(ci, ri)
+                if not nbrs:
+                    max_shifts.append(float('inf'))
                     continue
+                cur_min = min(n.distance(u) for n in nbrs)
+                if cur_min <= spacing + TOL:
+                    max_shifts.append(0.0)
+                    continue
+                hi = cur_min - spacing + 0.5
+                lo = 0.0
+                for _ in range(32):
+                    mid = (lo + hi) / 2
+                    test = translate(u, -mid, 0)
+                    if all(n.distance(test) >= spacing for n in nbrs):
+                        lo = mid
+                    else:
+                        hi = mid
+                max_shifts.append(lo)
 
-                lo, hi = 0.0, max_possible
-                for _ in range(24):
+            col_shift = min(s for s in max_shifts if s != float('inf')) if any(
+                s != float('inf') for s in max_shifts) else 0.0
+            if col_shift > TOL:
+                for idx in idxs:
+                    new_units[idx] = translate(new_units[idx], -col_shift, 0)
+
+        # ── 第二階段：逐行推 Y ────────────────────────────────────────────────
+        for ri in range(1, num_rows):
+            for ci in range(num_cols):
+                idx = pos_to_idx.get((ri, ci))
+                if idx is None:
+                    continue
+                u = new_units[idx]
+                nbrs = below_row_nbrs(ci, ri)
+                if not nbrs:
+                    continue
+                cur_min = min(n.distance(u) for n in nbrs)
+                if cur_min <= spacing + TOL:
+                    continue
+                hi = cur_min - spacing + 0.5
+                lo = 0.0
+                for _ in range(32):
                     mid = (lo + hi) / 2
                     test = translate(u, 0, -mid)
-                    if all(n.distance(test) >= spacing - TOL for n in y_neighbors):
+                    if all(n.distance(test) >= spacing for n in nbrs):
                         lo = mid
                     else:
                         hi = mid
                 if lo > TOL:
                     new_units[idx] = translate(u, 0, -lo)
-                    # 同步更新 pair 內兩個 poly
-                    i = idx
-                    orig_unit = unary_union([polys[i*2], polys[i*2+1]])
-                    dx = new_units[i].centroid.x - orig_unit.centroid.x
-                    dy = new_units[i].centroid.y - orig_unit.centroid.y
-                    polys[i*2]   = translate(polys[i*2],   dx, dy)
-                    polys[i*2+1] = translate(polys[i*2+1], dx, dy)
 
-        # pair 內兩個 poly 依 unit 偏移量平移
+        # ── 第三階段：X 欄補推（Y 推後再對齊一次）───────────────────────────
+        for ci in range(1, num_cols):
+            idxs = col_idxs_n(ci)
+            max_shifts = []
+            for idx in idxs:
+                ri, _ = pair_pos[idx]
+                u = new_units[idx]
+                nbrs = left_col_nbrs(ci, ri)
+                if not nbrs:
+                    max_shifts.append(float('inf'))
+                    continue
+                cur_min = min(n.distance(u) for n in nbrs)
+                if cur_min <= spacing + TOL:
+                    max_shifts.append(0.0)
+                    continue
+                hi = cur_min - spacing + 0.5
+                lo = 0.0
+                for _ in range(32):
+                    mid = (lo + hi) / 2
+                    test = translate(u, -mid, 0)
+                    if all(n.distance(test) >= spacing for n in nbrs):
+                        lo = mid
+                    else:
+                        hi = mid
+                max_shifts.append(lo)
+
+            col_shift = min(s for s in max_shifts if s != float('inf')) if any(
+                s != float('inf') for s in max_shifts) else 0.0
+            if col_shift > TOL:
+                for idx in idxs:
+                    new_units[idx] = translate(new_units[idx], -col_shift, 0)
+
+        # ── 第四階段：Y 行補推（X 補推後再對齊一次）─────────────────────────
+        for ri in range(1, num_rows):
+            for ci in range(num_cols):
+                idx = pos_to_idx.get((ri, ci))
+                if idx is None:
+                    continue
+                u = new_units[idx]
+                nbrs = below_row_nbrs(ci, ri)
+                if not nbrs:
+                    continue
+                cur_min = min(n.distance(u) for n in nbrs)
+                if cur_min <= spacing + TOL:
+                    continue
+                hi = cur_min - spacing + 0.5
+                lo = 0.0
+                for _ in range(32):
+                    mid = (lo + hi) / 2
+                    test = translate(u, 0, -mid)
+                    if all(n.distance(test) >= spacing for n in nbrs):
+                        lo = mid
+                    else:
+                        hi = mid
+                if lo > TOL:
+                    new_units[idx] = translate(u, 0, -lo)
+
+        # ── 將 new_units 的位移同步回 polys ──────────────────────────────────
         new_polys = list(polys)
         for i in range(pair_count):
-            orig_unit = unary_union([polys[i*2], polys[i*2+1]])
+            orig_unit = units[i]
             new_unit  = new_units[i]
             dx = new_unit.centroid.x - orig_unit.centroid.x
             dy = new_unit.centroid.y - orig_unit.centroid.y
             new_polys[i*2]   = translate(polys[i*2],   dx, dy)
             new_polys[i*2+1] = translate(polys[i*2+1], dx, dy)
 
-    else:
-        # Matrix / V-Cut（完全不動）
+        return _make_fps(new_polys)
+
+    elif "V-Cut" in mode:
+        # V-Cut：純 bbox 最緊密排列（零間距，所有板子對齊到同一步距）
+        # 所有 poly 的 bbox 尺寸相同，直接用第一個 poly 的 bbox 當步距基準。
         new_polys = list(polys)
 
-        heights = [p.bounds[3] - p.bounds[1] for p in polys]
-        widths  = [p.bounds[2] - p.bounds[0] for p in polys]
-        avg_h = sum(heights) / len(heights)
-        avg_w = sum(widths)  / len(widths)
-        row_tol = avg_h * 0.5
-        col_tol = avg_w * 0.5
+        # 取所有 poly bbox 的最大寬高作為統一步距（V-Cut 不留 spacing）
+        step_w = max(p.bounds[2] - p.bounds[0] for p in polys)
+        step_h = max(p.bounds[3] - p.bounds[1] for p in polys)
 
-        by_y = sorted(range(len(polys)), key=lambda i: new_polys[i].centroid.y)
+        avg_h = sum(p.bounds[3] - p.bounds[1] for p in polys) / len(polys)
+        row_tol = avg_h * 0.5
+
+        # 分 row
+        by_y = sorted(range(len(polys)), key=lambda i: polys[i].centroid.y)
         rows = []
         cur_row = [by_y[0]]
         for k in range(1, len(by_y)):
             i, j = by_y[k], by_y[k-1]
-            if abs(new_polys[i].centroid.y - new_polys[j].centroid.y) < row_tol:
+            if abs(polys[i].centroid.y - polys[j].centroid.y) < row_tol:
                 cur_row.append(by_y[k])
             else:
                 rows.append(cur_row)
                 cur_row = [by_y[k]]
         rows.append(cur_row)
 
-        for row in rows:
-            row_sorted = sorted(row, key=lambda i: new_polys[i].centroid.x)
-            for k in range(1, len(row_sorted)):
-                new_polys[row_sorted[k]] = _push_shape_x(
-                    new_polys[row_sorted[k-1]], new_polys[row_sorted[k]], spacing, TOL)
-
-        by_x = sorted(range(len(polys)), key=lambda i: new_polys[i].centroid.x)
+        # 分 col（用原始 polys 分欄，不受推擠影響）
+        avg_w = sum(p.bounds[2] - p.bounds[0] for p in polys) / len(polys)
+        col_tol = avg_w * 0.5
+        by_x = sorted(range(len(polys)), key=lambda i: polys[i].centroid.x)
         cols = []
         cur_col = [by_x[0]]
         for k in range(1, len(by_x)):
             i, j = by_x[k], by_x[k-1]
-            if abs(new_polys[i].centroid.x - new_polys[j].centroid.x) < col_tol:
+            if abs(polys[i].centroid.x - polys[j].centroid.x) < col_tol:
                 cur_col.append(by_x[k])
             else:
                 cols.append(cur_col)
                 cur_col = [by_x[k]]
         cols.append(cur_col)
 
-        for col in cols:
-            col_sorted = sorted(col, key=lambda i: new_polys[i].centroid.y)
-            for k in range(1, len(col_sorted)):
-                new_polys[col_sorted[k]] = _push_shape_y(
-                    new_polys[col_sorted[k-1]], new_polys[col_sorted[k]], spacing, TOL)
+        num_rows = len(rows)
+        num_cols = len(cols)
 
-    new_fps = []
-    for i, (p, a, f, c) in enumerate(fps):
-        np_ = new_polys[i]
-        new_fps.append((np_, a, f, (np_.centroid.x, np_.centroid.y)))
-    return new_fps
+        # 建立 (ri, ci) -> idx 對照
+        # rows 由下到上（by_y 是從小 y 開始），cols 由左到右
+        pos_to_orig = {}  # (ri, ci) -> original idx
+        for ri, row in enumerate(rows):
+            row_sorted = sorted(row, key=lambda i: polys[i].centroid.x)
+            for ci, idx in enumerate(row_sorted):
+                pos_to_orig[(ri, ci)] = idx
+
+        # 錨點：(0, 0) 的 poly 左下角固定不動
+        anchor = new_polys[pos_to_orig[(0, 0)]]
+        anchor_x0 = anchor.bounds[0]
+        anchor_y0 = anchor.bounds[1]
+
+        # 所有 poly 重新對齊到整齊的 bbox 格子
+        for ri in range(num_rows):
+            for ci in range(num_cols):
+                idx = pos_to_orig.get((ri, ci))
+                if idx is None:
+                    continue
+                p = polys[idx]
+                target_x = anchor_x0 + ci * step_w
+                target_y = anchor_y0 + ri * step_h
+                dx = target_x - p.bounds[0]
+                dy = target_y - p.bounds[1]
+                new_polys[idx] = translate(p, dx, dy)
+
+        return _make_fps(new_polys)
+
+    else:
+        # Matrix：形狀感知緊密推擠
+        # 架構：先逐欄推 X（整欄統一平移），再逐欄推 Y（整欄統一平移）
+        # 這樣同一欄內所有 poly 的間距保證一致。
+        n_polys = len(polys)
+
+        avg_h = sum(p.bounds[3] - p.bounds[1] for p in polys) / n_polys
+        avg_w = sum(p.bounds[2] - p.bounds[0] for p in polys) / n_polys
+        row_tol = avg_h * 0.5
+
+        # ── 建立 row / col 索引 ───────────────────────────────────────────────
+        sorted_by_y = sorted(range(n_polys), key=lambda i: polys[i].centroid.y)
+        rows_of_polys = []
+        cur_row = [sorted_by_y[0]]
+        for k in range(1, len(sorted_by_y)):
+            prev, curr = sorted_by_y[k-1], sorted_by_y[k]
+            if abs(polys[curr].centroid.y - polys[prev].centroid.y) < row_tol:
+                cur_row.append(curr)
+            else:
+                rows_of_polys.append(cur_row)
+                cur_row = [curr]
+        rows_of_polys.append(cur_row)
+
+        poly_pos = {}   # idx -> (ri, ci)
+        for ri, row in enumerate(rows_of_polys):
+            row_sorted = sorted(row, key=lambda i: polys[i].centroid.x)
+            for ci, idx in enumerate(row_sorted):
+                poly_pos[idx] = (ri, ci)
+        pos_to_idx = {v: k for k, v in poly_pos.items()}
+
+        num_cols = max(ci for _, ci in poly_pos.values()) + 1
+        num_rows = len(rows_of_polys)
+
+        new_polys = list(polys)
+
+        def col_idxs(ci):
+            return [idx for idx, (_, c) in poly_pos.items() if c == ci]
+
+        def row_idxs(ri):
+            return [idx for idx, (r, _) in poly_pos.items() if r == ri]
+
+        def left_col_neighbors(ci, ri):
+            """回傳左欄（ci-1）中與 row ri 相鄰的所有 poly（ri-1, ri, ri+1）"""
+            result = []
+            for dr in [-1, 0, 1]:
+                nidx = pos_to_idx.get((ri + dr, ci - 1))
+                if nidx is not None:
+                    result.append(new_polys[nidx])
+            return result
+
+        def below_row_neighbors(ci, ri):
+            """回傳下方 row（ri-1）中與 col ci 相鄰的所有 poly（ci-1, ci, ci+1）"""
+            result = []
+            for dc in [-1, 0, 1]:
+                nidx = pos_to_idx.get((ri - 1, ci + dc))
+                if nidx is not None:
+                    result.append(new_polys[nidx])
+            return result
+
+        # ── 第一階段：逐欄推 X ────────────────────────────────────────────────
+        # 對每一欄（ci >= 1），找出該欄能往左平移的最大量，
+        # 限制條件：欄內每個 poly 跟左欄所有鄰居都必須保持 >= spacing。
+        # 取所有 poly 中最小的可移動量 → 整欄統一平移。
+        for ci in range(1, num_cols):
+            idxs = col_idxs(ci)
+            if not idxs:
+                continue
+
+            # 每個 poly 各自能往左移多少
+            max_shifts = []
+            for idx in idxs:
+                ri, _ = poly_pos[idx]
+                u = new_polys[idx]
+                nbrs = left_col_neighbors(ci, ri)
+                if not nbrs:
+                    max_shifts.append(float('inf'))
+                    continue
+
+                # 先確認目前距離
+                cur_min_dist = min(n.distance(u) for n in nbrs)
+                if cur_min_dist <= spacing + TOL:
+                    max_shifts.append(0.0)
+                    continue
+
+                # 二分搜尋：最多能往左移多少
+                hi = cur_min_dist - spacing + 0.5
+                lo = 0.0
+                for _ in range(32):
+                    mid = (lo + hi) / 2
+                    test = translate(u, -mid, 0)
+                    if all(n.distance(test) >= spacing for n in nbrs):
+                        lo = mid
+                    else:
+                        hi = mid
+                max_shifts.append(lo)
+
+            # 整欄取最小值（最保守）
+            col_shift = min(s for s in max_shifts if s != float('inf')) if any(
+                s != float('inf') for s in max_shifts) else 0.0
+
+            if col_shift > TOL:
+                for idx in idxs:
+                    new_polys[idx] = translate(new_polys[idx], -col_shift, 0)
+
+        # ── 第二階段：逐欄推 Y（由下到上每 row）─────────────────────────────
+        # 對每一欄 ci，從 row 1 開始往上，找出該欄 row ri 能往下平移的最大量，
+        # 限制：跟下方 row（ri-1）所有相鄰 poly 保持 >= spacing。
+        # 同樣取最小值 → 整欄同 row 統一平移（逐 row 處理）。
+        for ri in range(1, num_rows):
+            for ci in range(num_cols):
+                idx = pos_to_idx.get((ri, ci))
+                if idx is None:
+                    continue
+                u = new_polys[idx]
+                nbrs = below_row_neighbors(ci, ri)
+                if not nbrs:
+                    continue
+
+                cur_min_dist = min(n.distance(u) for n in nbrs)
+                if cur_min_dist <= spacing + TOL:
+                    continue
+
+                hi = cur_min_dist - spacing + 0.5
+                lo = 0.0
+                for _ in range(32):
+                    mid = (lo + hi) / 2
+                    test = translate(u, 0, -mid)
+                    if all(n.distance(test) >= spacing for n in nbrs):
+                        lo = mid
+                    else:
+                        hi = mid
+                if lo > TOL:
+                    new_polys[idx] = translate(u, 0, -lo)
+
+        # ── 第三階段：X 欄統一對齊補推 ───────────────────────────────────────
+        # 第一階段是整欄統一推，但第二階段 Y 推之後，左欄的 poly 可能位置改變，
+        # 導致右欄有些 poly 還可以再往左。再跑一次整欄 X 推，確保每欄都壓到最緊。
+        for ci in range(1, num_cols):
+            idxs = col_idxs(ci)
+            if not idxs:
+                continue
+
+            max_shifts = []
+            for idx in idxs:
+                ri, _ = poly_pos[idx]
+                u = new_polys[idx]
+                nbrs = left_col_neighbors(ci, ri)
+                if not nbrs:
+                    max_shifts.append(float('inf'))
+                    continue
+                cur_min_dist = min(n.distance(u) for n in nbrs)
+                if cur_min_dist <= spacing + TOL:
+                    max_shifts.append(0.0)
+                    continue
+                hi = cur_min_dist - spacing + 0.5
+                lo = 0.0
+                for _ in range(32):
+                    mid = (lo + hi) / 2
+                    test = translate(u, -mid, 0)
+                    if all(n.distance(test) >= spacing for n in nbrs):
+                        lo = mid
+                    else:
+                        hi = mid
+                max_shifts.append(lo)
+
+            col_shift = min(s for s in max_shifts if s != float('inf')) if any(
+                s != float('inf') for s in max_shifts) else 0.0
+
+            if col_shift > TOL:
+                for idx in idxs:
+                    new_polys[idx] = translate(new_polys[idx], -col_shift, 0)
+
+        # ── 第四階段：Y 行統一對齊補推 ───────────────────────────────────────
+        # 同理，X 補推後再做一次 Y 補推確保各行都壓到最緊。
+        for ri in range(1, num_rows):
+            for ci in range(num_cols):
+                idx = pos_to_idx.get((ri, ci))
+                if idx is None:
+                    continue
+                u = new_polys[idx]
+                nbrs = below_row_neighbors(ci, ri)
+                if not nbrs:
+                    continue
+                cur_min_dist = min(n.distance(u) for n in nbrs)
+                if cur_min_dist <= spacing + TOL:
+                    continue
+                hi = cur_min_dist - spacing + 0.5
+                lo = 0.0
+                for _ in range(32):
+                    mid = (lo + hi) / 2
+                    test = translate(u, 0, -mid)
+                    if all(n.distance(test) >= spacing for n in nbrs):
+                        lo = mid
+                    else:
+                        hi = mid
+                if lo > TOL:
+                    new_polys[idx] = translate(u, 0, -lo)
+
+        return _make_fps(new_polys)
+
 
 def _group_by_coord(coords, tol=30):
     if not coords:
@@ -522,7 +747,7 @@ def _group_by_coord(coords, tol=30):
     return groups
 
 
-def _push_shape_x(pa, pb, spacing, tol=0.01):
+def _push_shape_x(pa, pb, spacing, tol=0.005):
     if pb.bounds[0] < pa.bounds[2] - 0.1:
         return pb
     cur_dist = pa.distance(pb)
@@ -531,21 +756,21 @@ def _push_shape_x(pa, pb, spacing, tol=0.01):
     max_shift = cur_dist - spacing
     if max_shift <= 0:
         return pb
-    lo, hi = 0.0, max_shift
+    lo, hi = 0.0, max_shift+0.02
     for _ in range(24):
         mid = (lo + hi) / 2
         pb_test = translate(pb, -mid, 0)
-        if pa.distance(pb_test) < spacing - tol:
+        if pa.distance(pb_test) < spacing:
             hi = mid
         else:
             lo = mid
     result = translate(pb, -lo, 0)
-    if pa.distance(result) < spacing - tol:
+    if pa.distance(result) < spacing:
         return pb
     return result
 
 
-def _push_shape_y(pa, pb, spacing, tol=0.01):
+def _push_shape_y(pa, pb, spacing, tol=0.005):
     if pb.bounds[1] < pa.bounds[3] - 0.1:
         return pb
     cur_dist = pa.distance(pb)
@@ -554,16 +779,16 @@ def _push_shape_y(pa, pb, spacing, tol=0.01):
     max_shift = cur_dist - spacing
     if max_shift <= 0:
         return pb
-    lo, hi = 0.0, max_shift
+    lo, hi = 0.0, max_shift+0.02
     for _ in range(24):
         mid = (lo + hi) / 2
         pb_test = translate(pb, 0, -mid)
-        if pa.distance(pb_test) < spacing - tol:
+        if pa.distance(pb_test) < spacing:
             hi = mid
         else:
             lo = mid
     result = translate(pb, 0, -lo)
-    if pa.distance(result) < spacing - tol:
+    if pa.distance(result) < spacing:
         return pb
     return result
 
@@ -821,7 +1046,7 @@ def build_interactive_lines_from_dxf(src_path, fps, cx_cy_orig, raw_poly, offset
                                          [round(ec[i+1][0],4),round(ec[i+1][1],4)]]})
 
         try:
-            op = poly.buffer(offset_dist, join_style=2)
+            op = poly.buffer(offset_dist, join_style=2, quad_segs=64)
             if op.geom_type == 'MultiPolygon':
                 op = max(op.geoms, key=lambda g: g.area)
             oc = list(op.exterior.coords)
@@ -1086,7 +1311,6 @@ def calculate_bridge(data, lines, connectors, gap_half=1.75, r=1.0):
 
 
 def delete_bridge(connector_id, lines, connectors):
-    """刪除單一 bridge，補回被切斷的原始線段。"""
     target = next((c for c in connectors if c.get('id') == connector_id), None)
     if target is None:
         raise ValueError(f"connector {connector_id} not found")
@@ -1215,7 +1439,6 @@ async def nest(params: dict):
             SESSION['stats'] = stats
             SESSION['compressed_w'] = compw
             SESSION['compressed_h'] = comph
-            # Reset all bridge state
             SESSION['base_lines'] = []
             SESSION['interactive_lines'] = []
             SESSION['source_connectors'] = []
@@ -1246,7 +1469,7 @@ async def nest(params: dict):
                                           "coords":[[hc[i][0],hc[i][1]],[hc[i+1][0],hc[i+1][1]]],
                                           "type":"hole","kind":"line"})
                     try:
-                        op = poly.buffer(offset_dist, join_style=2)
+                        op = poly.buffer(offset_dist, join_style=2, quad_segs=64)
                         oc = list(op.exterior.coords)
                         for i in range(len(oc)-1):
                             lines.append({"id":str(uuid.uuid4()),
@@ -1262,7 +1485,6 @@ async def nest(params: dict):
                                          [round(fc[i+1][0],4),round(fc[i+1][1],4)]],
                                "type":"frame","kind":"line"})
 
-            # Store clean base_lines (no bridges cut yet)
             SESSION['base_lines'] = json.loads(json.dumps(lines))
             SESSION['interactive_lines'] = lines
 
@@ -1312,17 +1534,9 @@ async def nest(params: dict):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bridge state helpers
-# Architecture:
-#   base_lines           clean lines with NO bridges (set after nest/adjust)
-#   source_connectors    bridges placed manually (Bridge or Bridge×All)
-#   propagated_connectors copies generated by the last propagate call
-#   interactive_lines    base_lines with ALL connectors cuts applied;
-#                        rebuilt from scratch by _apply_all_connectors_to_base
-#   manual_connectors    source + propagated (for canvas and DXF)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _apply_all_connectors_to_base():
-    """Recompute interactive_lines from scratch using base_lines + all connectors."""
     lines = json.loads(json.dumps(SESSION["base_lines"]))
     all_conns = list(SESSION["source_connectors"]) + list(SESSION["propagated_connectors"])
     spacing = float(SESSION.get("last_params", {}).get("spacing", 2.0))
@@ -1334,55 +1548,50 @@ def _apply_all_connectors_to_base():
         if not orig_l1 or not orig_l2:
             continue
         def match(target, lines=lines):
-                    tc = target.get("coords")
-                    if not tc:
-                        return -1
-                    # 目標線段的中點（切割點附近）
-                    tmx = (tc[0][0] + tc[1][0]) / 2
-                    tmy = (tc[0][1] + tc[1][1]) / 2
-                    # 目標線段的方向向量（用來確認同向）
-                    tdx = tc[1][0] - tc[0][0]
-                    tdy = tc[1][1] - tc[0][1]
-                    tlen = math.sqrt(tdx**2 + tdy**2)
-                    if tlen < 1e-9:
-                        return -1
-                    tux, tuy = tdx / tlen, tdy / tlen  # 單位向量
+            tc = target.get("coords")
+            if not tc:
+                return -1
+            tmx = (tc[0][0] + tc[1][0]) / 2
+            tmy = (tc[0][1] + tc[1][1]) / 2
+            tdx = tc[1][0] - tc[0][0]
+            tdy = tc[1][1] - tc[0][1]
+            tlen = math.sqrt(tdx**2 + tdy**2)
+            if tlen < 1e-9:
+                return -1
+            tux, tuy = tdx / tlen, tdy / tlen
 
-                    best_i = -1
-                    best_d = 0.8  # 容許誤差 mm
+            best_i = -1
+            best_d = 0.8
 
-                    for i, l in enumerate(lines):
-                        if l.get("kind") == "arc":
-                            continue
-                        lc = l.get("coords", [])
-                        if len(lc) < 2:
-                            continue
+            for i, l in enumerate(lines):
+                if l.get("kind") == "arc":
+                    continue
+                lc = l.get("coords", [])
+                if len(lc) < 2:
+                    continue
 
-                        lx0, ly0 = lc[0][0], lc[0][1]
-                        lx1, ly1 = lc[1][0], lc[1][1]
-                        ldx, ldy = lx1 - lx0, ly1 - ly0
-                        ll = math.sqrt(ldx**2 + ldy**2)
-                        if ll < 1e-9:
-                            continue
-                        lux, luy = ldx / ll, ldy / ll
+                lx0, ly0 = lc[0][0], lc[0][1]
+                lx1, ly1 = lc[1][0], lc[1][1]
+                ldx, ldy = lx1 - lx0, ly1 - ly0
+                ll = math.sqrt(ldx**2 + ldy**2)
+                if ll < 1e-9:
+                    continue
+                lux, luy = ldx / ll, ldy / ll
 
-                        # 方向必須相同（點積接近 ±1）
-                        dot = abs(tux * lux + tuy * luy)
-                        if dot < 0.97:
-                            continue
+                dot = abs(tux * lux + tuy * luy)
+                if dot < 0.97:
+                    continue
 
-                        # 目標線段的中點必須落在候選線段上（投影在 [0, ll] 範圍內）
-                        proj = (tmx - lx0) * lux + (tmy - ly0) * luy
-                        if proj < -best_d or proj > ll + best_d:
-                            continue
+                proj = (tmx - lx0) * lux + (tmy - ly0) * luy
+                if proj < -best_d or proj > ll + best_d:
+                    continue
 
-                        # 中點到線段的垂直距離
-                        perp = abs((tmx - lx0) * luy - (tmy - ly0) * lux)
-                        if perp < best_d:
-                            best_d = perp
-                            best_i = i
+                perp = abs((tmx - lx0) * luy - (tmy - ly0) * lux)
+                if perp < best_d:
+                    best_d = perp
+                    best_i = i
 
-                    return best_i
+            return best_i
         idx1 = match(orig_l1)
         idx2 = match(orig_l2)
         if idx1 == -1 or idx2 == -1 or idx1 == idx2:
@@ -1411,14 +1620,13 @@ async def bridge(data: dict):
     r_arc    = max(spacing / 2, 0.1)
     bridge_w = float(data.get("bridge_w", 3.5))
     gap_half = max(bridge_w / 2, 0.1)
-    is_array = bool(data.get("is_array", False))   # ← NEW
+    is_array = bool(data.get("is_array", False))
     try:
         lines = SESSION["interactive_lines"]
         new_lines, new_src = calculate_bridge(data, lines, SESSION["source_connectors"],
                                               gap_half=gap_half, r=r_arc)
-        # ── tag the newly added connector ──────────────────────────────────
         if new_src:
-            new_src[-1]["_is_array"] = is_array        # ← NEW
+            new_src[-1]["_is_array"] = is_array
         SESSION["source_connectors"] = new_src
         _apply_all_connectors_to_base()
         _rebuild_manual_connectors()
@@ -1433,7 +1641,6 @@ async def bridge(data: dict):
 
 @app.post("/delete_bridge")
 async def delete_bridge_single(data: dict):
-    """Delete ONE connector (source or propagated) and restore its cut lines."""
     connector_id = data.get("connector_id")
     if not connector_id:
         return JSONResponse({"ok": False, "error": "Missing connector_id"}, status_code=400)
@@ -1458,7 +1665,6 @@ async def delete_bridge_single(data: dict):
 
 @app.post("/delete_bridge_array")
 async def delete_bridge_array_endpoint(data: dict):
-    """Delete a connector AND all its positional copies (source + propagated)."""
     connector_id = data.get("connector_id")
     if not connector_id:
         return JSONResponse({"ok": False, "error": "Missing connector_id"}, status_code=400)
@@ -1540,12 +1746,6 @@ async def reset_bridge():
 
 @app.post("/propagate_bridge")
 async def propagate_bridge(request: Request):
-    """
-    Propagate bridges to all copies.
-    Body: { "connector_ids": ["id1", "id2", ...] }  -> propagate only those connectors
-    Body: {}  -> propagate ALL source_connectors
-    Each call fully replaces propagated copies for the targeted connectors.
-    """
     body = {}
     try:
         body = await request.json()
@@ -1553,14 +1753,12 @@ async def propagate_bridge(request: Request):
         pass
 
     all_src = SESSION.get("source_connectors", [])
-    ids = body.get("connector_ids", None)   # list of ids, or None = all
+    ids = body.get("connector_ids", None)
     if ids is not None:
         id_set = set(ids)
-        # only propagate connectors that are flagged as array-type
         to_propagate = [c for c in all_src
                         if c.get("id") in id_set and c.get("_is_array", False)]
     else:
-        # "propagate all" also only touches array-flagged connectors
         to_propagate = [c for c in all_src if c.get("_is_array", False)]
 
     fps     = SESSION.get("final_polys_with_info", [])
@@ -1591,8 +1789,6 @@ async def propagate_bridge(request: Request):
                 rcx, rcy = fp_list[s].centroid.x, fp_list[s].centroid.y
                 return [(p.centroid.x-rcx, p.centroid.y-rcy) for p in fp_list]
 
-        # Keep propagated copies from OTHER source connectors; replace only those
-        # belonging to the connectors we are propagating now.
         propagating_ids = {c["id"] for c in to_propagate}
         kept_prop = [c for c in SESSION["propagated_connectors"]
                      if c.get("_src_id") not in propagating_ids]
@@ -1604,7 +1800,7 @@ async def propagate_bridge(request: Request):
 
             for dx, dy in get_offsets(src_c):
                 if abs(dx) < 0.01 and abs(dy) < 0.01:
-                    continue  # skip source copy itself
+                    continue
 
                 if orig_l1 and orig_l1.get("coords"):
                     exp_l1_coords = [
@@ -1653,7 +1849,6 @@ async def propagate_bridge(request: Request):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
-
 @app.post("/adjust")
 async def adjust(data: dict):
     mode    = SESSION.get('last_params', {}).get('mode', '')
@@ -1661,7 +1856,7 @@ async def adjust(data: dict):
     bsh     = SESSION.get('best_step_h', 0)
     bcc     = SESSION.get('best_count_col', 0)
     bcr     = SESSION.get('best_count_row', 0)
-    
+
     params  = SESSION.get('last_params')
     raw     = SESSION.get('raw_poly')
     block_name  = SESSION.get('geo_block_name')
@@ -1749,7 +1944,6 @@ async def adjust(data: dict):
         SESSION['stats']          = stats
         SESSION['compressed_w']   = compw
         SESSION['compressed_h']   = comph
-        # Reset all bridge state on layout change
         SESSION['base_lines'] = []
         SESSION['interactive_lines'] = []
         SESSION['source_connectors'] = []
