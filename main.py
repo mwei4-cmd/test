@@ -393,62 +393,71 @@ def compact_layout(fps, spacing, mode="Matrix"):
                 if lo > TOL:
                     new_units[idx] = translate(u, 0, -lo)
 
-        # ── 第三階段：X 欄補推（Y 推後再對齊一次）───────────────────────────
-        for ci in range(1, num_cols):
-            idxs = col_idxs_n(ci)
-            max_shifts = []
-            for idx in idxs:
-                ri, _ = pair_pos[idx]
-                u = new_units[idx]
-                nbrs = left_col_nbrs(ci, ri)
-                if not nbrs:
-                    max_shifts.append(float('inf'))
-                    continue
-                cur_min = min(n.distance(u) for n in nbrs)
-                if cur_min <= spacing + TOL:
-                    max_shifts.append(0.0)
-                    continue
-                hi = cur_min - spacing + 0.5
-                lo = 0.0
-                for _ in range(32):
-                    mid = (lo + hi) / 2
-                    test = translate(u, -mid, 0)
-                    if all(n.distance(test) >= spacing for n in nbrs):
-                        lo = mid
-                    else:
-                        hi = mid
-                max_shifts.append(lo)
+        # ── 第三階段以後：X/Y 交替補推直到收斂（最多 6 輪）────────────────────
+        for _pass in range(6):
+            total_moved = 0.0
 
-            col_shift = min(s for s in max_shifts if s != float('inf')) if any(
-                s != float('inf') for s in max_shifts) else 0.0
-            if col_shift > TOL:
+            # X 補推（逐欄整欄平移）
+            for ci in range(1, num_cols):
+                idxs = col_idxs_n(ci)
+                max_shifts = []
                 for idx in idxs:
-                    new_units[idx] = translate(new_units[idx], -col_shift, 0)
+                    ri, _ = pair_pos[idx]
+                    u = new_units[idx]
+                    nbrs = left_col_nbrs(ci, ri)
+                    if not nbrs:
+                        max_shifts.append(float('inf'))
+                        continue
+                    cur_min = min(n.distance(u) for n in nbrs)
+                    if cur_min <= spacing + TOL:
+                        max_shifts.append(0.0)
+                        continue
+                    hi = cur_min - spacing + 0.5
+                    lo = 0.0
+                    for _ in range(32):
+                        mid = (lo + hi) / 2
+                        test = translate(u, -mid, 0)
+                        if all(n.distance(test) >= spacing for n in nbrs):
+                            lo = mid
+                        else:
+                            hi = mid
+                    max_shifts.append(lo)
 
-        # ── 第四階段：Y 行補推（X 補推後再對齊一次）─────────────────────────
-        for ri in range(1, num_rows):
-            for ci in range(num_cols):
-                idx = pos_to_idx.get((ri, ci))
-                if idx is None:
-                    continue
-                u = new_units[idx]
-                nbrs = below_row_nbrs(ci, ri)
-                if not nbrs:
-                    continue
-                cur_min = min(n.distance(u) for n in nbrs)
-                if cur_min <= spacing + TOL:
-                    continue
-                hi = cur_min - spacing + 0.5
-                lo = 0.0
-                for _ in range(32):
-                    mid = (lo + hi) / 2
-                    test = translate(u, 0, -mid)
-                    if all(n.distance(test) >= spacing for n in nbrs):
-                        lo = mid
-                    else:
-                        hi = mid
-                if lo > TOL:
-                    new_units[idx] = translate(u, 0, -lo)
+                col_shift = min(s for s in max_shifts if s != float('inf')) if any(
+                    s != float('inf') for s in max_shifts) else 0.0
+                if col_shift > TOL:
+                    for idx in idxs:
+                        new_units[idx] = translate(new_units[idx], -col_shift, 0)
+                    total_moved += col_shift
+
+            # Y 補推（逐行）
+            for ri in range(1, num_rows):
+                for ci in range(num_cols):
+                    idx = pos_to_idx.get((ri, ci))
+                    if idx is None:
+                        continue
+                    u = new_units[idx]
+                    nbrs = below_row_nbrs(ci, ri)
+                    if not nbrs:
+                        continue
+                    cur_min = min(n.distance(u) for n in nbrs)
+                    if cur_min <= spacing + TOL:
+                        continue
+                    hi = cur_min - spacing + 0.5
+                    lo = 0.0
+                    for _ in range(32):
+                        mid = (lo + hi) / 2
+                        test = translate(u, 0, -mid)
+                        if all(n.distance(test) >= spacing for n in nbrs):
+                            lo = mid
+                        else:
+                            hi = mid
+                    if lo > TOL:
+                        new_units[idx] = translate(u, 0, -lo)
+                        total_moved += lo
+
+            if total_moved < TOL:
+                break
 
         # ── 將 new_units 的位移同步回 polys ──────────────────────────────────
         new_polys = list(polys)
@@ -667,69 +676,75 @@ def compact_layout(fps, spacing, mode="Matrix"):
                 if lo > TOL:
                     new_polys[idx] = translate(u, 0, -lo)
 
-        # ── 第三階段：X 欄統一對齊補推 ───────────────────────────────────────
-        # 第一階段是整欄統一推，但第二階段 Y 推之後，左欄的 poly 可能位置改變，
-        # 導致右欄有些 poly 還可以再往左。再跑一次整欄 X 推，確保每欄都壓到最緊。
-        for ci in range(1, num_cols):
-            idxs = col_idxs(ci)
-            if not idxs:
-                continue
+        # ── 第三階段以後：X/Y 交替補推直到收斂（最多 6 輪）────────────────────
+        # 每推一次 X 會讓左欄更緊，右欄因此可以再跟進；
+        # 每推一次 Y 同理。迭代直到整體位移量 < TOL 為止。
+        for _pass in range(6):
+            total_moved = 0.0
 
-            max_shifts = []
-            for idx in idxs:
-                ri, _ = poly_pos[idx]
-                u = new_polys[idx]
-                nbrs = left_col_neighbors(ci, ri)
-                if not nbrs:
-                    max_shifts.append(float('inf'))
+            # X 補推（逐欄整欄平移）
+            for ci in range(1, num_cols):
+                idxs = col_idxs(ci)
+                if not idxs:
                     continue
-                cur_min_dist = min(n.distance(u) for n in nbrs)
-                if cur_min_dist <= spacing + TOL:
-                    max_shifts.append(0.0)
-                    continue
-                hi = cur_min_dist - spacing + 0.5
-                lo = 0.0
-                for _ in range(32):
-                    mid = (lo + hi) / 2
-                    test = translate(u, -mid, 0)
-                    if all(n.distance(test) >= spacing for n in nbrs):
-                        lo = mid
-                    else:
-                        hi = mid
-                max_shifts.append(lo)
-
-            col_shift = min(s for s in max_shifts if s != float('inf')) if any(
-                s != float('inf') for s in max_shifts) else 0.0
-
-            if col_shift > TOL:
+                max_shifts = []
                 for idx in idxs:
-                    new_polys[idx] = translate(new_polys[idx], -col_shift, 0)
+                    ri, _ = poly_pos[idx]
+                    u = new_polys[idx]
+                    nbrs = left_col_neighbors(ci, ri)
+                    if not nbrs:
+                        max_shifts.append(float('inf'))
+                        continue
+                    cur_min_dist = min(n.distance(u) for n in nbrs)
+                    if cur_min_dist <= spacing + TOL:
+                        max_shifts.append(0.0)
+                        continue
+                    hi = cur_min_dist - spacing + 0.5
+                    lo = 0.0
+                    for _ in range(32):
+                        mid = (lo + hi) / 2
+                        test = translate(u, -mid, 0)
+                        if all(n.distance(test) >= spacing for n in nbrs):
+                            lo = mid
+                        else:
+                            hi = mid
+                    max_shifts.append(lo)
 
-        # ── 第四階段：Y 行統一對齊補推 ───────────────────────────────────────
-        # 同理，X 補推後再做一次 Y 補推確保各行都壓到最緊。
-        for ri in range(1, num_rows):
-            for ci in range(num_cols):
-                idx = pos_to_idx.get((ri, ci))
-                if idx is None:
-                    continue
-                u = new_polys[idx]
-                nbrs = below_row_neighbors(ci, ri)
-                if not nbrs:
-                    continue
-                cur_min_dist = min(n.distance(u) for n in nbrs)
-                if cur_min_dist <= spacing + TOL:
-                    continue
-                hi = cur_min_dist - spacing + 0.5
-                lo = 0.0
-                for _ in range(32):
-                    mid = (lo + hi) / 2
-                    test = translate(u, 0, -mid)
-                    if all(n.distance(test) >= spacing for n in nbrs):
-                        lo = mid
-                    else:
-                        hi = mid
-                if lo > TOL:
-                    new_polys[idx] = translate(u, 0, -lo)
+                col_shift = min(s for s in max_shifts if s != float('inf')) if any(
+                    s != float('inf') for s in max_shifts) else 0.0
+                if col_shift > TOL:
+                    for idx in idxs:
+                        new_polys[idx] = translate(new_polys[idx], -col_shift, 0)
+                    total_moved += col_shift
+
+            # Y 補推（逐行）
+            for ri in range(1, num_rows):
+                for ci in range(num_cols):
+                    idx = pos_to_idx.get((ri, ci))
+                    if idx is None:
+                        continue
+                    u = new_polys[idx]
+                    nbrs = below_row_neighbors(ci, ri)
+                    if not nbrs:
+                        continue
+                    cur_min_dist = min(n.distance(u) for n in nbrs)
+                    if cur_min_dist <= spacing + TOL:
+                        continue
+                    hi = cur_min_dist - spacing + 0.5
+                    lo = 0.0
+                    for _ in range(32):
+                        mid = (lo + hi) / 2
+                        test = translate(u, 0, -mid)
+                        if all(n.distance(test) >= spacing for n in nbrs):
+                            lo = mid
+                        else:
+                            hi = mid
+                    if lo > TOL:
+                        new_polys[idx] = translate(u, 0, -lo)
+                        total_moved += lo
+
+            if total_moved < TOL:
+                break
 
         return _make_fps(new_polys)
 
